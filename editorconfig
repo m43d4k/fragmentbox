@@ -1,0 +1,46 @@
+# top-most EditorConfig file
+root = true
+
+# ========================================
+# Default: 全体共通ルール（2スペース）
+# ========================================
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true
+
+# ========================================
+# Markdown / テキスト：末尾スペース維持
+# ========================================
+[*.md]
+trim_trailing_whitespace = false
+
+[*.txt]
+trim_trailing_whitespace = false
+
+# ========================================
+# Makefile：GNU Make仕様（タブ必須）
+# ========================================
+[Makefile]
+indent_style = tab
+
+# ========================================
+# CSS・SCSS・SASS・LESS：4スペース
+# ========================================
+[*.{css,scss,sass,less}]
+indent_size = 4
+
+# ========================================
+# Python：PEP8準拠で4スペース
+# ========================================
+[*.py]
+indent_size = 4
+
+# ========================================
+# Go：gofmt準拠でタブ
+# ========================================
+[*.go]
+indent_style = tab

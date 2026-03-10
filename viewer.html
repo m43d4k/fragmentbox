@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>fragmentbox</title>
+  <link rel="stylesheet" href="/css/viewer.css">
+</head>
+<body>
+
+<header>
+  <div id="header-top">
+    <h1>fragmentbox</h1>
+    <div id="source-tabs">
+      <button class="source-tab active" data-source="inbox">inbox</button>
+      <button class="source-tab" data-source="archive">archive</button>
+    </div>
+  </div>
+  <input id="search" type="text" placeholder="Search..." autocomplete="off">
+  <div id="date-filter">
+    <input id="date-from" type="date" title="From">
+    <span>–</span>
+    <input id="date-to" type="date" title="To">
+    <button id="date-clear-btn" class="tag-clear-btn" style="display:none">✕</button>
+  </div>
+</header>
+
+<div id="tag-filters">
+  <button id="tag-mode-btn" class="tag-mode-btn" title="Toggle AND/OR">AND</button>
+  <button id="tag-clear-btn" class="tag-clear-btn" style="display:none">✕ Clear</button>
+</div>
+
+<div id="fragments">
+  <div id="count"></div>
+  <div id="cards"></div>
+  <div id="empty" style="display:none">No notes found</div>
+</div>
+
+<div id="confirm-overlay" style="display:none">
+  <div id="confirm-dialog">
+    <p id="confirm-message">Move this note to Trash?</p>
+    <div id="confirm-buttons">
+      <button id="confirm-cancel">Cancel</button>
+      <button id="confirm-ok">Move to Trash</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  let allFragments = [];
+  let activeTags = new Set();
+  let searchQuery = "";
+  let tagMode = "AND"; // "AND" | "OR"
+  let dateFrom = "";
+  let dateTo = "";
+  let currentSource = "inbox"; // "inbox" | "archive"
+
+  // --- データ取得 ---
+  async function load() {
+    const [frags, tags] = await Promise.all([
+      fetch(`/api/fragments?source=${currentSource}`).then(r => r.json()),
+      fetch(`/api/tags?source=${currentSource}`).then(r => r.json()),
+    ]);
+    allFragments = frags;
+    renderTagFilters(tags);
+    render();
+  }
+
+  // --- タグフィルターボタン ---
+  function renderTagFilters(tags) {
+    const container = document.getElementById("tag-filters");
+    // トグルボタンを残してタグボタンだけ削除
+    [...container.querySelectorAll(".tag-btn")].forEach(el => el.remove());
+    tags.forEach(tag => {
+      const btn = document.createElement("button");
+      btn.className = "tag-btn";
+      btn.textContent = `#${tag}`;
+      btn.dataset.tag = tag;
+      btn.addEventListener("click", () => {
+        if (activeTags.has(tag)) {
+          activeTags.delete(tag);
+          btn.classList.remove("active");
+        } else {
+          activeTags.add(tag);
+          btn.classList.add("active");
+        }
+        render();
+      });
+      container.appendChild(btn);
+    });
+  }
+
+  // --- フィルタリング ---
+  function filtered() {
+    return allFragments.filter(f => {
+      if (activeTags.size > 0) {
+        if (tagMode === "AND") {
+          if (![...activeTags].every(t => f.tags.includes(t))) return false;
+        } else {
+          if (![...activeTags].some(t => f.tags.includes(t))) return false;
+        }
+      }
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        if (!f.content.toLowerCase().includes(q)) return false;
+      }
+      if (dateFrom && f.datetime < dateFrom) return false;
+      if (dateTo   && f.datetime > dateTo + "T23:59:59") return false;
+      return true;
+    });
+  }
+
+  // --- コンテンツ描画 ---
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function renderLine(raw) {
+    // 行末スペース2つ（Markdown強制改行）を除去
+    const line = raw.replace(/  $/, "");
+
+    if (!line) return `<div class="line-empty"></div>`;
+
+    // メタデータ行: title: / sitename: / description:
+    const metaMatch = line.match(/^(title|sitename|description):\s*(.*)/);
+    if (metaMatch) {
+      return `<div class="line-meta"><span class="meta-key">${metaMatch[1]}:</span><span class="meta-value">${escapeHtml(metaMatch[2])}</span></div>`;
+    }
+
+    // 通常行: URL・タグをハイライト
+    let html = escapeHtml(line);
+    html = html.replace(/(https?:\/\/\S+)/g, '<a class="url" href="$1" target="_blank" rel="noopener">$1</a>');
+    html = html.replace(/#(\w+)/g, '<span class="tag-inline" data-tag="$1">#$1</span>');
+    return `<div class="line-text">${html}</div>`;
+  }
+
+  function renderContent(content) {
+    const lines = content.split("\n").map(l => l.replace(/  $/, ""));
+    const result = [];
+    let lastWasEmpty = false;
+    let i = 0;
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // URL単独行 → 後続メタデータを先読みしてタイトルリンクに変換
+      if (/^https?:\/\/\S+$/.test(line.trim())) {
+        const url = line.trim();
+        let title = null, sitename = null, description = null;
+        let j = i + 1;
+
+        while (j < lines.length) {
+          const next = lines[j].replace(/  $/, "");
+          let m;
+          if ((m = next.match(/^title:\s*(.*)/)))       { title = m[1]; j++; }
+          else if ((m = next.match(/^sitename:\s*(.*)/)))   { sitename = m[1]; j++; }
+          else if ((m = next.match(/^description:\s*(.*)/))) { description = m[1]; j++; }
+          else break;
+        }
+
+        if (title) {
+          let html = `<div class="url-block">`;
+          if (sitename)    html += `<div class="line-meta">${escapeHtml(sitename)}</div>`;
+          html += `<a class="url-title" href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>`;
+          if (description) html += `<div class="line-meta description">${escapeHtml(description)}</div>`;
+          html += `</div>`;
+          result.push(html);
+          lastWasEmpty = false;
+          i = j;
+        } else {
+          result.push(`<div class="line-text"><a class="url" href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(url)}</a></div>`);
+          lastWasEmpty = false;
+          i++;
+        }
+        continue;
+      }
+
+      const rendered = renderLine(line);
+      const isEmpty = rendered.includes("line-empty");
+      if (isEmpty && lastWasEmpty) { i++; continue; }
+      lastWasEmpty = isEmpty;
+      result.push(rendered);
+      i++;
+    }
+
+    return result.join("");
+  }
+
+  function formatDatetime(iso) {
+    const d = new Date(iso);
+    const pad = n => String(n).padStart(2, "0");
+    return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  // --- カード描画 ---
+  function render() {
+    const frags = filtered();
+    const cards = document.getElementById("cards");
+    const empty = document.getElementById("empty");
+    const count = document.getElementById("count");
+
+    count.textContent = `${frags.length} notes`;
+    document.getElementById("tag-clear-btn").style.display = activeTags.size > 0 ? "" : "none";
+    document.getElementById("date-clear-btn").style.display = (dateFrom || dateTo) ? "" : "none";
+
+    if (frags.length === 0) {
+      cards.innerHTML = "";
+      empty.style.display = "block";
+      return;
+    }
+    empty.style.display = "none";
+
+    const deleteBtn = currentSource === "inbox"
+      ? `<button class="delete-btn" data-id="{id}" title="Move to Trash"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>`
+      : "";
+    cards.innerHTML = frags.map(f => `
+      <div class="card" data-id="${f.id}">
+        <div class="card-body">${renderContent(f.content)}</div>
+        <div class="card-footer">
+          <span class="card-datetime">${formatDatetime(f.datetime)}</span>
+          ${deleteBtn.replace("{id}", f.id)}
+        </div>
+      </div>
+    `).join("");
+  }
+
+  // --- 削除確認ダイアログ ---
+  let pendingDeleteId = null;
+
+  function showConfirm(id) {
+    pendingDeleteId = id;
+    document.getElementById("confirm-overlay").style.display = "flex";
+  }
+
+  function hideConfirm() {
+    pendingDeleteId = null;
+    document.getElementById("confirm-overlay").style.display = "none";
+  }
+
+  document.getElementById("confirm-cancel").addEventListener("click", hideConfirm);
+
+  document.getElementById("confirm-ok").addEventListener("click", async () => {
+    if (!pendingDeleteId) return;
+    const id = pendingDeleteId;
+    hideConfirm();
+    await fetch(`/api/fragments/${id}`, { method: "DELETE" });
+    allFragments = allFragments.filter(f => f.id !== id);
+    render();
+  });
+
+  document.getElementById("confirm-overlay").addEventListener("click", e => {
+    if (e.target === document.getElementById("confirm-overlay")) hideConfirm();
+  });
+
+  // --- イベント ---
+  document.getElementById("cards").addEventListener("click", e => {
+    if (e.target.classList.contains("delete-btn")) {
+      showConfirm(e.target.dataset.id);
+      return;
+    }
+    const tag = e.target.dataset.tag;
+    if (!tag) return;
+    activeTags.add(tag);
+    const btn = document.querySelector(`.tag-btn[data-tag="${tag}"]`);
+    if (btn) btn.classList.add("active");
+    render();
+  });
+
+  document.getElementById("search").addEventListener("input", e => {
+    searchQuery = e.target.value.trim();
+    render();
+  });
+
+  document.getElementById("date-from").addEventListener("change", e => { dateFrom = e.target.value; render(); });
+  document.getElementById("date-to").addEventListener("change",   e => { dateTo   = e.target.value; render(); });
+  document.getElementById("date-clear-btn").addEventListener("click", () => {
+    dateFrom = dateTo = "";
+    document.getElementById("date-from").value = "";
+    document.getElementById("date-to").value = "";
+    render();
+  });
+
+  document.getElementById("tag-clear-btn").addEventListener("click", () => {
+    activeTags.clear();
+    document.querySelectorAll(".tag-btn.active").forEach(b => b.classList.remove("active"));
+    render();
+  });
+
+  document.getElementById("tag-mode-btn").addEventListener("click", () => {
+    tagMode = tagMode === "AND" ? "OR" : "AND";
+    document.getElementById("tag-mode-btn").textContent = tagMode;
+    render();
+  });
+
+  document.querySelectorAll(".source-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.source === currentSource) return;
+      currentSource = btn.dataset.source;
+      document.querySelectorAll(".source-tab").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      activeTags.clear();
+      searchQuery = "";
+      dateFrom = dateTo = "";
+      document.getElementById("search").value = "";
+      document.getElementById("date-from").value = "";
+      document.getElementById("date-to").value = "";
+      load();
+    });
+  });
+
+  load();
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+[paths]
+inbox   = "~/idea_pool/fragmentbox/inbox"
+archive = "~/idea_pool/fragmentbox/archive"
+trash   = "~/idea_pool/fragmentbox/Trash"
+
+[viewer]
+port = 8765
+
+[tags]
+presets = ["idea", "todo", "ref", "question", "memo", "later"]

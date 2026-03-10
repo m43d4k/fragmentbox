@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# Local tool config
+mise.toml
+.claude/
+
+# OS
+.DS_Store
+
+# sh
+*.sh
