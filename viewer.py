@@ -67,6 +67,23 @@ def get_tags(source: str = "inbox") -> list[str]:
     return sorted(tags)
 
 
+@app.patch("/api/fragments/{fragment_id}/favorite")
+def toggle_favorite(fragment_id: str, source: str = "inbox") -> dict:
+    d = _source_dir(source)
+    path = d / f"{fragment_id}.md"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Fragment not found")
+    content = path.read_text(encoding="utf-8").rstrip()
+    if "#favorite" in content:
+        content = re.sub(r"[ \t]*#favorite\b", "", content).rstrip()
+        favorited = False
+    else:
+        content = content + " #favorite"
+        favorited = True
+    path.write_text(content + "\n", encoding="utf-8")
+    return {"status": "ok", "favorited": favorited, "tags": TAG_PATTERN.findall(content)}
+
+
 @app.delete("/api/fragments/{fragment_id}")
 def delete_fragment(fragment_id: str) -> dict:
     path = INBOX_DIR / f"{fragment_id}.md"

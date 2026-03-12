@@ -243,6 +243,43 @@ a.url-title:hover { color: #5b9bd5; }
   font-size: 14px;
 }
 
+#header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* お気に入りフィルターボタン */
+.fav-filter-btn {
+  background: transparent;
+  color: #555;
+  border: 1px solid #444;
+  border-radius: 10px;
+  padding: 3px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.fav-filter-btn:hover { color: #e05555; border-color: #e05555; }
+.fav-filter-btn.active { color: #e05555; border-color: #444; }
+.fav-filter-btn.active:hover { border-color: #e05555; }
+
+/* カード内★ボタン */
+.fav-btn {
+  background: transparent;
+  color: #555;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 3px 6px;
+  line-height: 1;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.fav-btn:hover { color: #e05555; border-color: #e05555; }
+.fav-btn.active { color: #e05555; border-color: #444; }
+.fav-btn.active:hover { border-color: #e05555; }
+
 /* 削除ボタン */
 .delete-btn {
   background: transparent;

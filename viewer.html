@@ -11,9 +11,12 @@
 <header>
   <div id="header-top">
     <h1>fragmentbox</h1>
-    <div id="source-tabs">
-      <button class="source-tab active" data-source="inbox">inbox</button>
-      <button class="source-tab" data-source="archive">archive</button>
+    <div id="header-right">
+      <button id="fav-filter-btn" class="fav-filter-btn" title="Show favorites only">♥</button>
+      <div id="source-tabs">
+        <button class="source-tab active" data-source="inbox">inbox</button>
+        <button class="source-tab" data-source="archive">archive</button>
+      </div>
     </div>
   </div>
   <input id="search" type="text" placeholder="Search..." autocomplete="off">
@@ -54,6 +57,7 @@
   let dateFrom = "";
   let dateTo = "";
   let currentSource = "inbox"; // "inbox" | "archive"
+  let showFavoritesOnly = false;
 
   // --- データ取得 ---
   async function load() {
@@ -93,6 +97,7 @@
   // --- フィルタリング ---
   function filtered() {
     return allFragments.filter(f => {
+      if (showFavoritesOnly && !f.tags.includes("favorite")) return false;
       if (activeTags.size > 0) {
         if (tagMode === "AND") {
           if (![...activeTags].every(t => f.tags.includes(t))) return false;
@@ -214,18 +219,23 @@
     }
     empty.style.display = "none";
 
-    const deleteBtn = currentSource === "inbox"
-      ? `<button class="delete-btn" data-id="{id}" title="Move to Trash"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>`
-      : "";
-    cards.innerHTML = frags.map(f => `
-      <div class="card" data-id="${f.id}">
-        <div class="card-body">${renderContent(f.content)}</div>
-        <div class="card-footer">
-          <span class="card-datetime">${formatDatetime(f.datetime)}</span>
-          ${deleteBtn.replace("{id}", f.id)}
+    const trashIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
+    cards.innerHTML = frags.map(f => {
+      const isFav = f.tags.includes("favorite");
+      const favBtn = `<button class="fav-btn${isFav ? " active" : ""}" data-id="${f.id}" title="Toggle favorite">♥</button>`;
+      const delBtn = currentSource === "inbox"
+        ? `<button class="delete-btn" data-id="${f.id}" title="Move to Trash">${trashIcon}</button>`
+        : "";
+      return `
+        <div class="card" data-id="${f.id}">
+          <div class="card-body">${renderContent(f.content)}</div>
+          <div class="card-footer">
+            <span class="card-datetime">${formatDatetime(f.datetime)}</span>
+            ${favBtn}${delBtn}
+          </div>
         </div>
-      </div>
-    `).join("");
+      `;
+    }).join("");
   }
 
   // --- 削除確認ダイアログ ---
@@ -257,7 +267,16 @@
   });
 
   // --- イベント ---
-  document.getElementById("cards").addEventListener("click", e => {
+  document.getElementById("cards").addEventListener("click", async e => {
+    if (e.target.classList.contains("fav-btn")) {
+      const id = e.target.dataset.id;
+      const res = await fetch(`/api/fragments/${id}/favorite?source=${currentSource}`, { method: "PATCH" });
+      const data = await res.json();
+      const frag = allFragments.find(f => f.id === id);
+      if (frag) frag.tags = data.tags;
+      render();
+      return;
+    }
     if (e.target.classList.contains("delete-btn")) {
       showConfirm(e.target.dataset.id);
       return;
@@ -296,6 +315,12 @@
     render();
   });
 
+  document.getElementById("fav-filter-btn").addEventListener("click", () => {
+    showFavoritesOnly = !showFavoritesOnly;
+    document.getElementById("fav-filter-btn").classList.toggle("active", showFavoritesOnly);
+    render();
+  });
+
   document.querySelectorAll(".source-tab").forEach(btn => {
     btn.addEventListener("click", () => {
       if (btn.dataset.source === currentSource) return;
@@ -305,9 +330,11 @@
       activeTags.clear();
       searchQuery = "";
       dateFrom = dateTo = "";
+      showFavoritesOnly = false;
       document.getElementById("search").value = "";
       document.getElementById("date-from").value = "";
       document.getElementById("date-to").value = "";
+      document.getElementById("fav-filter-btn").classList.remove("active");
       load();
     });
   });
