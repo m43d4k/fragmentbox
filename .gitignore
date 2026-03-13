@@ -14,3 +14,6 @@ mise.toml
 
 # sh
 *.sh
+
+# UV
+uv.lock

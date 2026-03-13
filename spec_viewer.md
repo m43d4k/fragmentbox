@@ -23,18 +23,25 @@
 - 日付範囲絞り込み（from / to、片方だけも可）
 - タグ・日付それぞれにクリアボタン
 
+お気に入り:
+- カードフッターにお気に入りボタンを表示（inbox / archive 両方）
+- ボタン押下で #favorite タグのトグル（付け外し）
+- サーバー側でファイルを書き換えて即時反映
+
 削除（inboxのみ）:
 - カードフッターにゴミ箱アイコンボタンを表示
-- ボタン押下で確認ダイアログ（小モーダル）を表示、許可で ~/idea_pool/fragmentbox/Trash/ へ移動
+- ボタン押下で確認ダイアログ（小モーダル）を表示、許可で config.toml の trash パスへ移動
+- 本文中の ../assets/ 参照画像も同時に Trash へ移動
 - Trash ディレクトリが存在しない場合は自動作成
 
 API:
 - GET /api/fragments?source=inbox|archive — フラグメント一覧（JSON）、デフォルト inbox
 - GET /api/tags?source=inbox|archive — 使用中タグ一覧（JSON）、デフォルト inbox
+- PATCH /api/fragments/{id}/favorite?source=inbox|archive — お気に入りトグル
 - DELETE /api/fragments/{id} — 指定フラグメントを Trash へ移動（inbox専用）
 
 設定:
-- config.toml で inbox / archive / trash のパスとサーバーポートを管理
+- config.toml で inbox / archive / trash / assets のパスとサーバーポートを管理
 
 起動方式:
 - `python viewer.py` を実行するとサーバーが起動し、ブラウザが自動的に開く

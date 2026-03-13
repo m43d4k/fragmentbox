@@ -39,6 +39,10 @@
   <div id="empty" style="display:none">No notes found</div>
 </div>
 
+<div id="lightbox" style="display:none">
+  <img id="lightbox-img" src="" alt="">
+</div>
+
 <div id="confirm-overlay" style="display:none">
   <div id="confirm-dialog">
     <p id="confirm-message">Move this note to Trash?</p>
@@ -109,8 +113,8 @@
         const q = searchQuery.toLowerCase();
         if (!f.content.toLowerCase().includes(q)) return false;
       }
-      if (dateFrom && f.datetime < dateFrom) return false;
-      if (dateTo   && f.datetime > dateTo + "T23:59:59") return false;
+      if (dateFrom && f.created_at < dateFrom) return false;
+      if (dateTo   && f.created_at > dateTo + "T23:59:59") return false;
       return true;
     });
   }
@@ -129,6 +133,14 @@
     const line = raw.replace(/  $/, "");
 
     if (!line) return `<div class="line-empty"></div>`;
+
+    // Markdown画像: ![alt](path) 単独行
+    const imgMatch = line.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+    if (imgMatch) {
+      const alt = imgMatch[1];
+      const src = imgMatch[2].replace(/^\.\.\/assets\//, "/assets/");
+      return `<div class="line-image"><img class="fragment-image" src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" onerror="this.insertAdjacentHTML('afterend','<span class=\\'fragment-image-missing\\'>(画像なし)</span>');this.remove()"></div>`;
+    }
 
     // メタデータ行: title: / sitename: / description:
     const metaMatch = line.match(/^(title|sitename|description):\s*(.*)/);
@@ -230,7 +242,7 @@
         <div class="card" data-id="${f.id}">
           <div class="card-body">${renderContent(f.content)}</div>
           <div class="card-footer">
-            <span class="card-datetime">${formatDatetime(f.datetime)}</span>
+            <span class="card-datetime">${formatDatetime(f.created_at)}</span>
             ${favBtn}${delBtn}
           </div>
         </div>
@@ -266,8 +278,27 @@
     if (e.target === document.getElementById("confirm-overlay")) hideConfirm();
   });
 
-  // --- イベント ---
+  // --- ライトボックス ---
+  const lightbox = document.getElementById("lightbox");
+  const lightboxImg = document.getElementById("lightbox-img");
+
+  function closeLightbox() {
+    lightbox.style.display = "none";
+    lightboxImg.src = "";
+  }
+
+  lightbox.addEventListener("click", closeLightbox);
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && lightbox.style.display !== "none") closeLightbox();
+  });
+
   document.getElementById("cards").addEventListener("click", async e => {
+    if (e.target.classList.contains("fragment-image")) {
+      lightboxImg.src = e.target.src;
+      lightboxImg.alt = e.target.alt;
+      lightbox.style.display = "flex";
+      return;
+    }
     if (e.target.classList.contains("fav-btn")) {
       const id = e.target.dataset.id;
       const res = await fetch(`/api/fragments/${id}/favorite?source=${currentSource}`, { method: "PATCH" });
