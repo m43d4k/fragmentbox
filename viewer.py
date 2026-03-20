@@ -48,6 +48,10 @@ class DeleteResponse(BaseModel):
     id: str
 
 
+class FragmentUpdate(BaseModel):
+    content: str
+
+
 app = FastAPI()
 app.mount("/css", StaticFiles(directory=HERE / "css"), name="css")
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -109,6 +113,16 @@ def toggle_favorite(fragment_id: str, source: Source = "inbox") -> FavoriteRespo
         favorited = True
     path.write_text(content + "\n", encoding="utf-8")
     return FavoriteResponse(status="ok", favorited=favorited, tags=TAG_PATTERN.findall(content))
+
+
+@app.put("/api/fragments/{fragment_id}")
+def update_fragment(fragment_id: str, body: FragmentUpdate, source: Source = "inbox") -> Fragment:
+    d = _source_dir(source)
+    path = d / f"{fragment_id}.md"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Fragment not found")
+    path.write_text(body.content, encoding="utf-8")
+    return parse_fragment(path)
 
 
 @app.delete("/api/fragments/{fragment_id}")

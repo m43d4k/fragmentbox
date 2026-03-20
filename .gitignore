@@ -12,6 +12,10 @@ mise.toml
 # OS
 .DS_Store
 
+# Runtime
+.viewer.log
+.viewer.pid
+
 # sh
 *.sh
 

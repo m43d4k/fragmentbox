@@ -8,7 +8,7 @@ assets  = "~/idea_pool/fragmentbox/assets"
 port = 8765
 
 [tags]
-presets = ["idea", "todo", "ref", "question", "memo", "later"]
+presets = ["idea", "todo", "ref", "tips", "dtm", "music", "movie", "later"]
 
 [images]
 quality = 80  # WebP 変換時の品質 (1-100)

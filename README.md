@@ -82,7 +82,8 @@ The server starts and a browser window opens automatically (port: `8765`).
 - Real-time text search
 - Tag filtering (multiple selection, AND/OR toggle)
 - Date range filter
-- Toggle favorite (add/remove the `#favorite` tag)
+- Toggle favorite (add/remove the `#favorite` tag) / filter to show favorites only
+- Edit notes (Inbox and Archive; open the edit modal via the pencil icon on a card)
 - Delete notes from the Inbox only (moved to the Trash folder configured in `config.toml`; attached images are also moved)
 
 Press `Ctrl+C` in the terminal to stop the server.
