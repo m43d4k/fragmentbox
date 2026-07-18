@@ -345,6 +345,7 @@ class DropTextEdit(QTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAcceptRichText(False)
         self.setAcceptDrops(True)
 
     def _image_urls(self, mime_data) -> list[Path]:
