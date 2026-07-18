@@ -109,23 +109,36 @@
   }
 
   // --- フィルタリング ---
+  function matchesFilters(f, tags = activeTags) {
+    if (showFavoritesOnly && !f.tags.includes("favorite")) return false;
+    if (tags.size > 0) {
+      if (tagMode === "AND") {
+        if (![...tags].every(t => f.tags.includes(t))) return false;
+      } else {
+        if (![...tags].some(t => f.tags.includes(t))) return false;
+      }
+    }
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      if (!f.content.toLowerCase().includes(q)) return false;
+    }
+    if (dateFrom && f.created_at < dateFrom) return false;
+    if (dateTo   && f.created_at > dateTo + "T23:59:59") return false;
+    return true;
+  }
+
   function filtered() {
-    return allFragments.filter(f => {
-      if (showFavoritesOnly && !f.tags.includes("favorite")) return false;
-      if (activeTags.size > 0) {
-        if (tagMode === "AND") {
-          if (![...activeTags].every(t => f.tags.includes(t))) return false;
-        } else {
-          if (![...activeTags].some(t => f.tags.includes(t))) return false;
-        }
-      }
-      if (searchQuery) {
-        const q = searchQuery.toLowerCase();
-        if (!f.content.toLowerCase().includes(q)) return false;
-      }
-      if (dateFrom && f.created_at < dateFrom) return false;
-      if (dateTo   && f.created_at > dateTo + "T23:59:59") return false;
-      return true;
+    return allFragments.filter(f => matchesFilters(f));
+  }
+
+  function updateTagButtonAvailability() {
+    document.querySelectorAll(".tag-btn").forEach(btn => {
+      const tag = btn.dataset.tag;
+      const unavailable = tagMode === "AND"
+        && !activeTags.has(tag)
+        && !allFragments.some(f => matchesFilters(f, new Set([...activeTags, tag])));
+      btn.disabled = unavailable;
+      btn.title = unavailable ? "No matching notes" : "";
     });
   }
 
@@ -226,6 +239,7 @@
   // --- カード描画 ---
   function render() {
     const frags = filtered();
+    updateTagButtonAvailability();
     const cards = document.getElementById("cards");
     const empty = document.getElementById("empty");
     const count = document.getElementById("count");

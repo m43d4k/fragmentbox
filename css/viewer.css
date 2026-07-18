@@ -106,6 +106,16 @@ header h1 {
 }
 .tag-btn:hover { background: #4a4a4a; color: #ccc; }
 .tag-btn.active { background: #4a4a4a; color: #e0e0e0; border-color: #666; }
+.tag-btn:disabled {
+  background: #303234;
+  color: #5a5a5a;
+  border-color: #3d3d3d;
+  border-style: dashed;
+  cursor: not-allowed;
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.tag-btn:disabled:hover { background: #303234; color: #5a5a5a; }
 
 .tag-mode-btn {
   background: #3c3f41;
