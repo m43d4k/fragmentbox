@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -385,7 +386,6 @@ class FragmentBoxWindow(QWidget):
 
     def _build_ui(self):
         self.setWindowTitle("fragmentbox")
-        self.setFixedWidth(520)
         self.setStyleSheet("QWidget { background-color: #2b2b2b; }")
 
         outer = QVBoxLayout(self)
@@ -397,7 +397,9 @@ class FragmentBoxWindow(QWidget):
         row.setSpacing(0)
 
         self.text_area = DropTextEdit()
-        self.text_area.setFixedHeight(160)
+        self.text_area.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.text_area.setStyleSheet("""
             QTextEdit {
                 background-color: #3c3f41;
@@ -413,14 +415,16 @@ class FragmentBoxWindow(QWidget):
         tag_col = QVBoxLayout()
         tag_col.setContentsMargins(8, 0, 0, 0)
         tag_col.setSpacing(4)
+        tag_buttons = []
         for tag in self._tags:
             btn = QPushButton(f"#{tag}")
             btn.setStyleSheet(_BTN_SS.format(pad="4px 6px", size=11, extra=""))
             btn.clicked.connect(lambda checked, t=tag: self._insert_tag(t))
             tag_col.addWidget(btn)
+            tag_buttons.append(btn)
         tag_col.addStretch()
         row.addLayout(tag_col)
-        outer.addLayout(row)
+        outer.addLayout(row, 1)
 
         # ボトムバー
         bottom = QHBoxLayout()
@@ -443,6 +447,23 @@ class FragmentBoxWindow(QWidget):
         bottom.addWidget(self.save_btn)
 
         outer.addLayout(bottom)
+
+        # 起動時は入力欄をタグボタン列の自然な高さに合わせる。
+        # 以降は固定せず、ウインドウとともに縦横へ伸縮させる。
+        if tag_buttons:
+            text_height = sum(btn.sizeHint().height() for btn in tag_buttons)
+            text_height += tag_col.spacing() * (len(tag_buttons) - 1)
+        else:
+            text_height = 160
+        margins = outer.contentsMargins()
+        initial_height = (
+            margins.top()
+            + text_height
+            + outer.spacing()
+            + bottom.sizeHint().height()
+            + margins.bottom()
+        )
+        self.resize(520, initial_height)
 
         # "Ctrl+Return": 文字列指定のため StandardKey と異なりプラットフォーム変換は保証されない
         self._save_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
