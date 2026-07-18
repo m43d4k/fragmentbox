@@ -38,10 +38,23 @@ _COPY_ONLY_EXTENSIONS = {".svg", ".gif"}  # このアプリでは無変換コピ
 
 URL_PATTERN     = re.compile(r'https?://\S+')
 YOUTUBE_PATTERN = re.compile(r'https?://(www\.)?(youtube\.com|youtu\.be)/\S+')
+TAG_PATTERN     = re.compile(r'#(\w+)')
+TAG_AT_END_PATTERN = re.compile(r'#\w+([ \t]*)$')
 
 
 def load_tags() -> list[str]:
     return _config.get("tags", {}).get("presets", [])
+
+
+def _has_tag(content: str, tag: str) -> bool:
+    return tag in TAG_PATTERN.findall(content)
+
+
+def _tag_separator(content: str) -> str:
+    match = TAG_AT_END_PATTERN.search(content)
+    if match is None:
+        return "\n\n"
+    return "" if match.group(1) else " "
 
 
 def save_fragment(text: str) -> Path:
@@ -499,10 +512,9 @@ class FragmentBoxWindow(QWidget):
 
     def _insert_tag(self, tag: str) -> None:
         content = self.text_area.toPlainText()
-        if f"#{tag}" in content:
+        if _has_tag(content, tag):
             return
-        has_tag = any(f"#{t}" in content for t in self._tags)
-        prefix = " " if has_tag else "\n\n"
+        prefix = _tag_separator(content)
         cursor = self.text_area.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertText(f"{prefix}#{tag}")
