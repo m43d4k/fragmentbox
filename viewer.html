@@ -30,7 +30,7 @@
 
 <div id="tag-filters">
   <button id="tag-mode-btn" class="tag-mode-btn" title="Toggle AND/OR">AND</button>
-  <button id="tag-clear-btn" class="tag-clear-btn" style="display:none">✕ Clear</button>
+  <button id="tag-clear-btn" class="tag-clear-btn is-hidden" disabled aria-hidden="true">✕ Clear</button>
 </div>
 
 <div id="fragments">
@@ -245,7 +245,11 @@
     const count = document.getElementById("count");
 
     count.textContent = `${frags.length} notes`;
-    document.getElementById("tag-clear-btn").style.display = activeTags.size > 0 ? "" : "none";
+    const tagClearBtn = document.getElementById("tag-clear-btn");
+    const hasActiveTags = activeTags.size > 0;
+    tagClearBtn.classList.toggle("is-hidden", !hasActiveTags);
+    tagClearBtn.disabled = !hasActiveTags;
+    tagClearBtn.setAttribute("aria-hidden", String(!hasActiveTags));
     document.getElementById("date-clear-btn").style.display = (dateFrom || dateTo) ? "" : "none";
 
     if (frags.length === 0) {

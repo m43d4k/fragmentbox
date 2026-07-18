@@ -141,6 +141,9 @@ header h1 {
   transition: color 0.15s;
 }
 .tag-clear-btn:hover { color: #ccc; }
+#tag-clear-btn.is-hidden {
+  visibility: hidden;
+}
 
 /* カードリスト */
 #fragments {
