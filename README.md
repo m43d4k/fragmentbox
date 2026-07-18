@@ -19,15 +19,6 @@ fragmentbox consists of two components:
 ## Requirements
 
 - Python 3.12+
-- [libvips](https://www.libvips.org/) (used for image compression)
-
-  ```bash
-  # macOS
-  brew install vips
-
-  # Ubuntu / Debian
-  sudo apt install libvips
-  ```
 
 ## Setup
 
@@ -97,15 +88,9 @@ Press `Ctrl+C` in the terminal to stop the server.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
-if [[ "$(uname)" == "Darwin" ]]; then
-  export DYLD_LIBRARY_PATH="/opt/homebrew/lib:/usr/local/lib:$DYLD_LIBRARY_PATH"
-fi
-
 source .venv/bin/activate
 python fragmentbox.py
 ```
-
-On macOS, `DYLD_LIBRARY_PATH` is set for libvips. Adjust the path to match your libvips installation.
 
 ## File Structure
 

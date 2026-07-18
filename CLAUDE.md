@@ -24,7 +24,7 @@ FRAGMENTBOX_LOG=DEBUG ./run_fragmentbox.sh
 ./run_viewe.sh   # typo に注意
 ```
 
-`DYLD_LIBRARY_PATH` は `run_fragmentbox.sh` がセットする。コード内で `os.environ["DYLD_LIBRARY_PATH"]` を操作しない。
+libvips は `pyvips[binary]` で同梱する。`DYLD_LIBRARY_PATH` はコードや起動スクリプトで設定しない。
 
 ## Architecture
 

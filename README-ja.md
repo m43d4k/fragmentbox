@@ -19,15 +19,6 @@ fragmentbox は2つのコンポーネントで構成されています。
 ## 必要環境
 
 - Python 3.12+
-- [libvips](https://www.libvips.org/)（画像圧縮に使用）
-
-  ```bash
-  # macOS
-  brew install vips
-
-  # Ubuntu / Debian
-  sudo apt install libvips
-  ```
 
 ## セットアップ
 
@@ -97,15 +88,9 @@ python viewer.py
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
-if [[ "$(uname)" == "Darwin" ]]; then
-  export DYLD_LIBRARY_PATH="/opt/homebrew/lib:/usr/local/lib:$DYLD_LIBRARY_PATH"
-fi
-
 source .venv/bin/activate
 python fragmentbox.py
 ```
-
-macOS では libvips のために `DYLD_LIBRARY_PATH` を設定しています。libvips のインストール先に合わせて、各自の環境でパスを変更してください。
 
 ## ファイル構成
 
