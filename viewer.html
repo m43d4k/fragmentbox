@@ -4,19 +4,31 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>fragmentbox</title>
-  <link rel="stylesheet" href="/css/viewer.css">
+  <link rel="stylesheet" href="/css/viewer.css?v=folder-move">
 </head>
 <body>
 
+<aside id="folder-pane" aria-label="フォルダ">
+  <button id="add-folder" aria-label="フォルダを作成" title="フォルダを作成">+</button>
+  <form id="folder-form" hidden>
+    <input id="folder-name" aria-label="フォルダ名" placeholder="フォルダ名" required autocomplete="off">
+    <button type="submit">作成</button>
+    <button id="folder-cancel" type="button">取消</button>
+  </form>
+  <nav id="folder-list" aria-label="フォルダ一覧"></nav>
+  <div id="archive-section">
+    <button id="archive-link" type="button">archive</button>
+    <nav id="archive-folders" aria-label="アーカイブ内のフォルダ"></nav>
+  </div>
+</aside>
+<main>
+<div id="viewer-scroll">
+<div id="status-message" role="alert" hidden></div>
 <header>
   <div id="header-top">
     <h1>fragmentbox</h1>
     <div id="header-right">
       <button id="fav-filter-btn" class="fav-filter-btn" title="Show favorites only">♥</button>
-      <div id="source-tabs">
-        <button class="source-tab active" data-source="inbox">inbox</button>
-        <button class="source-tab" data-source="archive">archive</button>
-      </div>
     </div>
   </div>
   <input id="search" type="text" placeholder="Search..." autocomplete="off">
@@ -39,18 +51,24 @@
   <div id="empty" style="display:none">No notes found</div>
 </div>
 
+</div>
+<form id="composer" aria-label="投稿">
+  <div id="post-target">投稿先フォルダを選択してください</div>
+  <div id="post-body">
+    <textarea id="post-text" aria-label="投稿本文" placeholder="メモを入力…" spellcheck="false"></textarea>
+    <div id="post-tags" aria-label="投稿タグ"></div>
+  </div>
+  <div id="post-actions">
+    <span id="post-status" role="status" aria-live="polite"></span>
+    <input id="post-files" type="file" multiple hidden>
+    <button id="post-image" type="button">IMG</button>
+    <button id="post-save" type="submit">Save</button>
+  </div>
+</form>
+</main>
+
 <div id="lightbox" style="display:none">
   <img id="lightbox-img" src="" alt="">
-</div>
-
-<div id="edit-overlay" style="display:none">
-  <div id="edit-dialog">
-    <textarea id="edit-textarea" spellcheck="false"></textarea>
-    <div id="edit-buttons">
-      <button id="edit-cancel">Cancel</button>
-      <button id="edit-save">Save</button>
-    </div>
-  </div>
 </div>
 
 <div id="confirm-overlay" style="display:none">
@@ -65,23 +83,359 @@
 
 <script>
   let allFragments = [];
+  const editDrafts = new Map();
   let activeTags = new Set();
   let searchQuery = "";
   let tagMode = "AND"; // "AND" | "OR"
   let dateFrom = "";
   let dateTo = "";
-  let currentSource = "inbox"; // "inbox" | "archive"
+  let currentSource = "inbox";
+  let currentFolder = "";
+  let folders = [];
+  let archiveFolders = [];
+  let loadVersion = 0;
+  let folderBusy = false;
+  let draggedFolder = null;
   let showFavoritesOnly = false;
+  let composerBusy = false;
+  let composerReady = false;
+  let imageExtensions = [];
+  let imageMaxBytes = 0;
+
+  function readFolderSelection() {
+    const saved = sessionStorage.getItem("fragmentbox.folder");
+    if (!saved) return { source: "inbox", folder: "" };
+    const selection = JSON.parse(saved);
+    if (!selection || !["notes", "inbox", "archive"].includes(selection.source)
+        || typeof selection.folder !== "string") throw new Error("保存されたフォルダ指定が不正です");
+    return selection;
+  }
+
+  function rememberFolderSelection() {
+    try {
+      sessionStorage.setItem("fragmentbox.folder", JSON.stringify({ source: currentSource, folder: currentFolder }));
+    } catch (error) { showError(new Error(`フォルダ選択を記憶できません: ${error.message}`)); }
+  }
+
+  function canPost() {
+    return composerReady && currentSource !== "archive" && (currentSource !== "notes" || currentFolder !== "");
+  }
+
+  function updateComposer() {
+    document.getElementById("post-target").textContent = currentSource === "archive"
+      ? "Archiveには投稿できません"
+      : currentSource === "notes" && !currentFolder ? "投稿先フォルダを選択してください"
+      : `投稿先: ${currentFolder || "inbox"}`;
+    document.getElementById("post-text").disabled = composerBusy;
+    document.querySelectorAll("#composer button, #composer input").forEach(el => {
+      el.disabled = composerBusy || !canPost();
+    });
+  }
+
+  function setComposerBusy(busy) {
+    composerBusy = busy;
+    renderFolders();
+    document.querySelectorAll("#archive-link, #folder-form input, #folder-form button").forEach(el => { el.disabled = busy; });
+  }
+
+  async function initComposer() {
+    try {
+      const config = await request("/api/composer");
+      imageExtensions = config.image_extensions;
+      imageMaxBytes = config.image_max_bytes;
+      document.getElementById("post-files").accept = imageExtensions.join(",");
+      config.tags.forEach(tag => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = `#${tag}`;
+        button.addEventListener("click", () => {
+          const text = document.getElementById("post-text");
+          const tags = [...text.value.matchAll(/#([\p{L}\p{N}_]+)/gu)].map(m => m[1]);
+          if (!tags.includes(tag)) {
+            const tail = text.value.match(/#[\p{L}\p{N}_]+([ \t]*)$/u);
+            text.value += (tail ? (tail[1] ? "" : " ") : "\n\n") + `#${tag}`;
+          }
+          text.focus();
+        });
+        document.getElementById("post-tags").appendChild(button);
+      });
+      composerReady = true;
+      updateComposer();
+    } catch (error) {
+      document.getElementById("post-status").textContent = `投稿設定を取得できませんでした: ${error.message}。ビューアを再起動してページを再読み込みしてください。入力内容は保持されます。`;
+    }
+  }
+
+  function supportedImage(file) {
+    return imageExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
+  }
+
+  async function attachImages(files) {
+    if (composerBusy || folderBusy || !canPost()) return;
+    const images = [...files].filter(supportedImage);
+    if (!images.length) return;
+    setComposerBusy(true);
+    const status = document.getElementById("post-status");
+    const text = document.getElementById("post-text");
+    try {
+      for (const file of images) {
+        if (file.size > imageMaxBytes) throw new Error(`${file.name}: 画像は20 MiB以下にしてください`);
+        status.textContent = `画像を保存中: ${file.name}`;
+        const result = await request(`/api/images?${new URLSearchParams({ filename: file.name })}`, {
+          method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+        });
+        text.value += (text.value && !text.value.endsWith("\n") ? "  \n" : "") + result.markdown;
+      }
+      status.textContent = "画像を添付しました";
+    } catch (error) { status.textContent = error.message; }
+    finally { setComposerBusy(false); text.focus(); document.getElementById("post-files").value = ""; }
+  }
+
+  document.getElementById("post-image").addEventListener("click", () => document.getElementById("post-files").click());
+  document.getElementById("post-files").addEventListener("change", e => attachImages(e.target.files));
+  const postText = document.getElementById("post-text");
+  postText.addEventListener("dragover", e => {
+    if (composerBusy || !canPost()) return;
+    const files = [...e.dataTransfer.items].filter(item => item.kind === "file");
+    if (files.some(item => {
+      const file = item.getAsFile();
+      return file ? supportedImage(file) : ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "image/bmp", "image/x-ms-bmp", "image/tiff"].includes(item.type);
+    })) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }
+  });
+  postText.addEventListener("drop", e => {
+    if ([...e.dataTransfer.files].some(supportedImage)) {
+      e.preventDefault();
+      attachImages(e.dataTransfer.files);
+    }
+  });
+  document.getElementById("composer").addEventListener("keydown", e => {
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+    const save = e.key.toLowerCase() === "s" && (mac ? e.metaKey : e.ctrlKey);
+    const enter = e.key === "Enter" && (e.ctrlKey || (mac && e.metaKey));
+    if (!e.isComposing && (save || enter)) {
+      e.preventDefault();
+      document.getElementById("composer").requestSubmit();
+    }
+  });
+  document.getElementById("composer").addEventListener("submit", async e => {
+    e.preventDefault();
+    if (composerBusy || folderBusy || !canPost()) return;
+    const status = document.getElementById("post-status");
+    if (!postText.value.trim()) { status.textContent = "本文を入力してください"; return; }
+    const query = scopeQuery().toString();
+    setComposerBusy(true);
+    status.textContent = "URL情報を取得して保存中…";
+    try {
+      const result = await request(`/api/fragments?${query}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: postText.value }),
+      });
+      postText.value = "";
+      status.textContent = result.warnings.length ? `保存しました。${result.warnings.join(" / ")}` : "保存しました";
+      await load();
+    } catch (error) { status.textContent = error.message; }
+    finally { setComposerBusy(false); postText.focus(); }
+  });
+
+  function showError(error) {
+    const el = document.getElementById("status-message");
+    el.textContent = error.message;
+    el.hidden = false;
+  }
+
+  async function request(url, options) {
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(typeof data.detail === "string" ? data.detail : `Request failed (${response.status})`);
+    }
+    return response.json();
+  }
+
+  function scopeQuery() {
+    return new URLSearchParams({ source: currentSource, folder: currentFolder });
+  }
+
+  function renderFolders() {
+    updateComposer();
+    const list = document.getElementById("folder-list");
+    list.replaceChildren();
+    document.getElementById("add-folder").disabled = folderBusy || composerBusy;
+    document.getElementById("archive-link").disabled = folderBusy || composerBusy;
+    document.getElementById("archive-link").setAttribute("aria-current", String(currentSource === "archive" && !currentFolder));
+    const archiveList = document.getElementById("archive-folders");
+    archiveList.replaceChildren();
+    if (currentSource === "archive") {
+      archiveFolders.forEach(folder => {
+        const button = document.createElement("button");
+        button.textContent = folder.name;
+        button.setAttribute("aria-current", String(currentFolder === folder.name));
+        button.disabled = folderBusy || composerBusy;
+        button.addEventListener("click", () => selectFolder("archive", folder.name));
+        archiveList.appendChild(button);
+      });
+    }
+    folders.forEach(folder => {
+      const button = document.createElement("button");
+      button.textContent = folder.name;
+      button.className = "folder-name";
+      button.dataset.folderId = folder.id;
+      button.setAttribute("aria-current", String(folder.source === currentSource && folder.folder === currentFolder));
+      button.title = "ドラッグ、または Alt + ↑ / ↓ で並び替え";
+      button.draggable = !folderBusy && !composerBusy;
+      button.disabled = folderBusy || composerBusy;
+      button.addEventListener("click", () => {
+        selectFolder(folder.source, folder.folder);
+      });
+      button.addEventListener("dragstart", e => {
+        draggedFolder = folder.id;
+        e.dataTransfer.setData("text/plain", folder.id);
+        e.dataTransfer.effectAllowed = "move";
+      });
+      button.addEventListener("dragend", () => { draggedFolder = null; });
+      button.addEventListener("dragover", e => {
+        if (draggedFolder !== null && !folderBusy) e.preventDefault();
+      });
+      button.addEventListener("drop", e => {
+        e.preventDefault();
+        if (draggedFolder !== null) moveFolder(draggedFolder, folders.findIndex(f => f.id === folder.id));
+        draggedFolder = null;
+      });
+      button.addEventListener("keydown", e => {
+        if (!e.altKey || !["ArrowUp", "ArrowDown"].includes(e.key)) return;
+        e.preventDefault();
+        moveFolder(folder.id, folders.findIndex(f => f.id === folder.id) + (e.key === "ArrowUp" ? -1 : 1));
+      });
+      list.appendChild(button);
+    });
+  }
+
+  async function moveFolder(name, target) {
+    if (composerBusy || folderBusy || target < 0 || target >= folders.length) return;
+    const ordered = folders.map(f => f.id);
+    const index = ordered.indexOf(name);
+    if (index < 0 || index === target) return;
+    ordered.splice(index, 1);
+    ordered.splice(target, 0, name);
+    folderBusy = true;
+    renderFolders();
+    try {
+      folders = await request("/api/navigation/order", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names: ordered }),
+      });
+      document.getElementById("status-message").hidden = true;
+    } catch (error) { showError(error); }
+    finally {
+      folderBusy = false;
+      renderFolders();
+      [...document.querySelectorAll(".folder-name")].find(b => b.dataset.folderId === name)?.focus();
+    }
+  }
+
+  async function loadFolders() {
+    const source = currentSource;
+    try {
+      const [result, archived] = await Promise.all([
+        request("/api/navigation"),
+        source === "archive" ? request("/api/folders?source=archive") : Promise.resolve([]),
+      ]);
+      if (source !== currentSource) return;
+      folders = result;
+      archiveFolders = archived;
+      renderFolders();
+      await load();
+    } catch (error) { showError(error); }
+  }
+
+  document.getElementById("add-folder").addEventListener("click", () => {
+    document.getElementById("folder-form").hidden = false;
+    document.getElementById("folder-name").focus();
+  });
+  function closeFolderForm() {
+    document.getElementById("folder-form").hidden = true;
+    document.getElementById("folder-form").reset();
+  }
+  document.getElementById("folder-cancel").addEventListener("click", closeFolderForm);
+  document.getElementById("folder-name").addEventListener("keydown", e => {
+    if (e.key === "Escape") closeFolderForm();
+  });
+  document.getElementById("folder-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    if (composerBusy || folderBusy) return;
+    folderBusy = true;
+    renderFolders();
+    try {
+      const folder = await request("/api/folders", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: document.getElementById("folder-name").value.trim() }),
+      });
+      rememberScrollPosition();
+      currentSource = "notes";
+      currentFolder = folder.name;
+      rememberFolderSelection();
+      activeTags.clear();
+      closeFolderForm();
+      await loadFolders();
+    } catch (error) { showError(error); }
+    finally { folderBusy = false; renderFolders(); }
+  });
+
+  // フォルダごとの表示位置。nullは最下部を表し、永続保存しない。
+  const folderScrollPositions = new Map();
+  const viewerScroll = document.getElementById("viewer-scroll");
+  let displayedScrollKey = null;
+  let restoringScroll = null;
+
+  function rememberScrollPosition() {
+    if (displayedScrollKey !== null) {
+      const atBottom = viewerScroll.scrollHeight - viewerScroll.clientHeight - viewerScroll.scrollTop <= 2;
+      const position = restoringScroll ? restoringScroll.position : (atBottom ? null : viewerScroll.scrollTop);
+      folderScrollPositions.set(displayedScrollKey, position);
+    }
+    displayedScrollKey = null;
+    restoringScroll = null;
+  }
+
+  function applyScrollPosition() {
+    if (!restoringScroll || restoringScroll.key !== displayedScrollKey) return;
+    viewerScroll.scrollTop = restoringScroll.position === null
+      ? viewerScroll.scrollHeight : restoringScroll.position;
+  }
+
+  function restoreScrollPosition(key) {
+    displayedScrollKey = key;
+    restoringScroll = { key, position: folderScrollPositions.has(key) ? folderScrollPositions.get(key) : null };
+    applyScrollPosition();
+  }
+
+  // 画像の遅延読み込みで高さが変わっても復元する。ユーザー操作を優先する。
+  const scrollResizeObserver = new ResizeObserver(applyScrollPosition);
+  scrollResizeObserver.observe(document.getElementById("cards"));
+  scrollResizeObserver.observe(viewerScroll);
+  for (const event of ["wheel", "touchstart", "pointerdown", "keydown"]) {
+    viewerScroll.addEventListener(event, () => { restoringScroll = null; }, { passive: true });
+  }
 
   // --- データ取得 ---
   async function load() {
-    const [frags, tags] = await Promise.all([
-      fetch(`/api/fragments?source=${currentSource}`).then(r => r.json()),
-      fetch(`/api/tags?source=${currentSource}`).then(r => r.json()),
-    ]);
-    allFragments = frags;
-    renderTagFilters(tags);
+    rememberScrollPosition();
+    const version = ++loadVersion;
+    allFragments = [];
+    renderTagFilters([]);
     render();
+    try {
+      const query = scopeQuery();
+      const [frags, tags] = await Promise.all([
+        request(`/api/fragments?${query}`), request(`/api/tags?${query}`),
+      ]);
+      if (version !== loadVersion) return;
+      allFragments = frags;
+      renderTagFilters(tags);
+      render();
+      restoreScrollPosition(query.toString());
+      document.getElementById("status-message").hidden = true;
+    } catch (error) { if (version === loadVersion) showError(error); }
   }
 
   // --- タグフィルターボタン ---
@@ -128,7 +482,8 @@
   }
 
   function filtered() {
-    return allFragments.filter(f => matchesFilters(f));
+    return allFragments.filter(f => matchesFilters(f))
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   }
 
   function updateTagButtonAvailability() {
@@ -151,7 +506,7 @@
       .replace(/"/g, "&quot;");
   }
 
-  function renderLine(raw) {
+  function renderLine(raw, imageLinks = [], repairId = null) {
     // 行末スペース2つ（Markdown強制改行）を除去
     const line = raw.replace(/  $/, "");
 
@@ -161,8 +516,14 @@
     const imgMatch = line.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
     if (imgMatch) {
       const alt = imgMatch[1];
-      const src = imgMatch[2].replace(/^\.\.\/assets\//, "/assets/");
-      return `<div class="line-image"><img class="fragment-image" src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" onerror="this.insertAdjacentHTML('afterend','<span class=\\'fragment-image-missing\\'>(画像なし)</span>');this.remove()"></div>`;
+      const link = imageLinks.find(link => link.original === imgMatch[2]);
+      if (link?.status === "missing") {
+        return `<div class="image-link-warning">画像が見つかりません: ${escapeHtml(link.original)}</div>`;
+      }
+      const notice = link?.status === "corrected"
+        ? `<div class="image-link-notice"><details class="image-link-warning"><summary>リンク補正あり</summary><div>MDの参照: ${escapeHtml(link.original)}</div><div>正しい参照: ${escapeHtml(link.corrected)}</div></details>${repairId !== null ? `<button class="repair-images-btn" data-id="${escapeHtml(repairId)}" title="この記事の画像リンクを修正" aria-label="この記事の画像リンクを修正">fix</button>` : ""}</div>` : "";
+      const src = link?.url || imgMatch[2].replace(/^(?:\.\.\/)+assets\//, "/assets/");
+      return `${notice}<div class="line-image"><img class="fragment-image" src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" onerror="this.insertAdjacentHTML('afterend','<span class=\\'fragment-image-missing\\'>(画像なし)</span>');this.remove()"></div>`;
     }
 
     // メタデータ行: title: / sitename: / description:
@@ -178,7 +539,7 @@
     return `<div class="line-text">${html}</div>`;
   }
 
-  function renderContent(content) {
+  function renderContent(content, imageLinks = [], repairId = null) {
     const lines = content.split("\n").map(l => l.replace(/  $/, ""));
     const result = [];
     let lastWasEmpty = false;
@@ -207,6 +568,11 @@
           if (sitename)    html += `<div class="line-meta">${escapeHtml(sitename)}</div>`;
           html += `<a class="url-title" href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>`;
           if (description) html += `<div class="line-meta description">${escapeHtml(description)}</div>`;
+          // メタデータ直後の画像1枚を、このリンクのサムネイルとしてまとめる。
+          if (j < lines.length && /^!\[[^\]]*\]\([^)]+\)$/.test(lines[j])) {
+            html += renderLine(lines[j], imageLinks, repairId);
+            j++;
+          }
           html += `</div>`;
           result.push(html);
           lastWasEmpty = false;
@@ -219,7 +585,7 @@
         continue;
       }
 
-      const rendered = renderLine(line);
+      const rendered = renderLine(line, imageLinks, repairId);
       const isEmpty = rendered.includes("line-empty");
       if (isEmpty && lastWasEmpty) { i++; continue; }
       lastWasEmpty = isEmpty;
@@ -228,6 +594,61 @@
     }
 
     return result.join("");
+  }
+
+  function editKey(id) {
+    return JSON.stringify([scopeQuery().toString(), id]);
+  }
+
+  function splitEditParts(content) {
+    const lines = content.match(/[^\n]*\n|[^\n]+$/g) || [];
+    const parts = [];
+    let text = "";
+    for (let i = 0; i < lines.length;) {
+      let j = i + 1;
+      let hasTitle = false;
+      if (/^https?:\/\/\S+$/.test(lines[i].trim())) {
+        while (j < lines.length && /^(title|sitename|description):/.test(lines[j])) {
+          if (/^title:\s*\S/.test(lines[j])) hasTitle = true;
+          j++;
+        }
+      }
+      if (hasTitle) {
+        if (j < lines.length && /^!\[[^\]]*\]\([^)]+\)$/.test(lines[j].trim())) j++;
+        parts.push({ type: "text", raw: text });
+        parts.push({ type: "link", raw: lines.slice(i, j).join("") });
+        text = "";
+        i = j;
+      } else { text += lines[i++]; }
+    }
+    parts.push({ type: "text", raw: text });
+    return parts;
+  }
+
+  function serializeEditParts(parts) {
+    let result = "";
+    parts.forEach((part, index) => {
+      if (part.type === "link" && result && !result.endsWith("\n")) result += "\n";
+      result += part.raw;
+      if (part.type === "link" && parts.slice(index + 1).some(p => p.raw) && !result.endsWith("\n")) result += "\n";
+    });
+    return result;
+  }
+
+  function renderArticleBody(fragment) {
+    const draft = editDrafts.get(editKey(fragment.id));
+    if (!draft) return renderContent(fragment.content, fragment.image_links, fragment.id);
+    if (!draft.parts) draft.parts = splitEditParts(draft.content);
+    const parts = draft.parts.map((part, index) => part.type === "link"
+      ? `<div class="edit-link-card">${renderContent(part.raw, fragment.image_links)}<button type="button" class="edit-remove-link" data-part="${index}" aria-label="リンクカードを削除" ${draft.busy ? "disabled" : ""}>×</button></div>`
+      : `<textarea class="edit-textarea" data-part="${index}" aria-label="記事本文" spellcheck="false" ${draft.busy ? "disabled" : ""}>${escapeHtml(part.raw)}</textarea>`).join("");
+    return `<div class="inline-editor">${parts}
+      <div class="edit-error" role="alert">${escapeHtml(draft.error || "")}</div>
+      <div class="edit-buttons">
+        <button class="edit-cancel" ${draft.busy ? "disabled" : ""}>Cancel</button>
+        <button class="edit-save" ${draft.busy ? "disabled" : ""}>${draft.busy ? "保存中…" : "Save"}</button>
+      </div>
+    </div>`;
   }
 
   function formatDatetime(iso) {
@@ -261,64 +682,188 @@
 
     const trashIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
     const editIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
+    const archiveIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><rect x="3" y="3" width="18" height="4"/><path d="M5 7v14h14V7M12 10v7m-3-3 3 3 3-3"/></svg>`;
+    const restoreIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><path d="M3 10h11a7 7 0 0 1 0 14" transform="translate(0 -3)"/><path d="m8 2-5 5 5 5"/></svg>`;
+    let previousDate = null;
     cards.innerHTML = frags.map(f => {
+      const date = formatDatetime(f.created_at).split(" ")[0];
+      const separator = previousDate !== null && date !== previousDate
+        ? `<div class="date-separator"><span>${date}</span></div>` : "";
+      previousDate = date;
       const isFav = f.tags.includes("favorite");
-      const favBtn = `<button class="fav-btn${isFav ? " active" : ""}" data-id="${f.id}" title="Toggle favorite">♥</button>`;
-      const editBtn = `<button class="edit-btn" data-id="${f.id}" title="Edit">${editIcon}</button>`;
-      const delBtn = currentSource === "inbox"
-        ? `<button class="delete-btn" data-id="${f.id}" title="Move to Trash">${trashIcon}</button>`
+      const favBtn = `<button class="fav-btn${isFav ? " active" : ""}" data-id="${escapeHtml(f.id)}" title="Toggle favorite">♥</button>`;
+      const editBtn = `<button class="edit-btn" data-id="${escapeHtml(f.id)}" title="Edit">${editIcon}</button>`;
+      const archiveBtn = currentSource !== "archive"
+        ? `<button class="archive-btn" data-id="${escapeHtml(f.id)}" title="アーカイブへ移動" aria-label="アーカイブへ移動">${archiveIcon}</button>`
+        : `<button class="restore-btn" data-id="${escapeHtml(f.id)}" title="元のフォルダに戻す" aria-label="元のフォルダに戻す">${restoreIcon}</button>`;
+      const moveBtn = currentSource !== "archive"
+        ? `<button class="move-btn" data-id="${escapeHtml(f.id)}" title="別のフォルダへ移動" aria-label="別のフォルダへ移動"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="pointer-events:none"><path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/><path d="M8 14h8m-3-3 3 3-3 3"/></svg></button>` : "";
+      const delBtn = currentSource !== "archive"
+        ? `<button class="delete-btn" data-id="${escapeHtml(f.id)}" title="Move to Trash">${trashIcon}</button>`
         : "";
       return `
-        <div class="card" data-id="${f.id}">
-          <div class="card-body">${renderContent(f.content)}</div>
+        ${separator}
+        <div class="card" data-id="${escapeHtml(f.id)}">
+          <div class="card-body">${renderArticleBody(f)}</div>
           <div class="card-footer">
             <span class="card-datetime">${formatDatetime(f.created_at)}</span>
-            ${favBtn}${editBtn}${delBtn}
+            ${editDrafts.has(editKey(f.id)) ? "" : favBtn + editBtn + moveBtn + archiveBtn + delBtn}
           </div>
         </div>
       `;
     }).join("");
   }
 
-  // --- 編集モーダル ---
-  let editingId = null;
+  function moveCandidates(entries, source, folder, query) {
+    const term = query.trim().toLocaleLowerCase();
+    return entries.filter(entry => entry.source !== "archive"
+      && !(entry.source === source && entry.folder === folder)
+      && entry.name.toLocaleLowerCase().includes(term));
+  }
+
+  function openMovePicker(trigger) {
+    document.querySelector(".move-picker")?.remove();
+    const source = currentSource, folder = currentFolder;
+    const scope = scopeQuery().toString(), id = trigger.dataset.id;
+    const picker = document.createElement("div");
+    picker.className = "move-picker";
+    picker.innerHTML = `<input type="search" placeholder="フォルダを検索" aria-label="移動先フォルダを検索" role="combobox" aria-expanded="true" aria-controls="move-options" aria-autocomplete="list"><div id="move-options" role="listbox" aria-label="移動先フォルダ"></div><div class="move-error" role="alert"></div>`;
+    trigger.parentElement.appendChild(picker);
+    const viewport = document.getElementById("viewer-scroll").getBoundingClientRect();
+    if (trigger.getBoundingClientRect().top - viewport.top < 260) {
+      picker.style.bottom = "auto";
+      picker.style.top = "calc(100% + 6px)";
+    }
+    const input = picker.querySelector("input"), list = picker.querySelector("[role=listbox]");
+    let matches = [], selected = 0, busy = false;
+    function paint() {
+      matches = moveCandidates(folders, source, folder, input.value);
+      selected = Math.max(0, Math.min(selected, matches.length - 1));
+      list.replaceChildren();
+      input.removeAttribute("aria-activedescendant");
+      matches.forEach((entry, index) => {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.id = `move-option-${index}`;
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", String(index === selected));
+        option.textContent = entry.name;
+        option.disabled = busy;
+        option.addEventListener("click", () => move(entry));
+        list.appendChild(option);
+        if (index === selected) input.setAttribute("aria-activedescendant", option.id);
+      });
+      if (!matches.length) list.textContent = "移動先がありません";
+    }
+    async function move(entry) {
+      if (busy || scope !== scopeQuery().toString()) return;
+      busy = true;
+      input.disabled = true;
+      const buttons = trigger.closest(".card").querySelectorAll("button");
+      buttons.forEach(button => { button.disabled = true; });
+      picker.querySelector(".move-error").textContent = "";
+      try {
+        await request(`/api/fragments/${encodeURIComponent(id)}/move?${scope}`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: entry.source, folder: entry.folder }),
+        });
+        picker.remove();
+        if (scope !== scopeQuery().toString()) return;
+        allFragments = allFragments.filter(fragment => fragment.id !== id);
+        renderTagFilters([...new Set(allFragments.flatMap(fragment => fragment.tags))].sort());
+        render();
+      } catch (error) {
+        picker.querySelector(".move-error").textContent = error.message;
+      } finally {
+        busy = false;
+        input.disabled = false;
+        buttons.forEach(button => { button.disabled = false; });
+      }
+    }
+    input.addEventListener("input", () => { selected = 0; paint(); });
+    picker.addEventListener("keydown", event => {
+      if (event.isComposing) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        picker.remove();
+        trigger.focus();
+      } else if (!busy && ["ArrowDown", "ArrowUp"].includes(event.key)) {
+        event.preventDefault();
+        selected += event.key === "ArrowDown" ? 1 : -1;
+        paint();
+        list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+        input.focus();
+      } else if (!busy && event.key === "Enter" && event.target === input) {
+        event.preventDefault();
+        if (matches[selected]) move(matches[selected]);
+      }
+    });
+    paint();
+    input.focus();
+  }
+
+  // --- 記事内編集 ---
+  document.addEventListener("click", event => {
+    if (!event.target.closest(".move-picker, .move-btn")) document.querySelector(".move-picker")?.remove();
+  });
+
 
   function showEdit(id, content) {
-    editingId = id;
-    document.getElementById("edit-textarea").value = content;
-    document.getElementById("edit-overlay").style.display = "flex";
-    document.getElementById("edit-textarea").focus();
-  }
-
-  function hideEdit() {
-    editingId = null;
-    document.getElementById("edit-overlay").style.display = "none";
-  }
-
-  document.getElementById("edit-cancel").addEventListener("click", hideEdit);
-
-  document.getElementById("edit-save").addEventListener("click", async () => {
-    if (!editingId) return;
-    const id = editingId;
-    const content = document.getElementById("edit-textarea").value;
-    hideEdit();
-    const res = await fetch(`/api/fragments/${id}?source=${currentSource}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
-    });
-    const updated = await res.json();
-    const idx = allFragments.findIndex(f => f.id === id);
-    if (idx !== -1) allFragments[idx] = updated;
+    const key = editKey(id);
+    if (!editDrafts.has(key)) editDrafts.set(key, { content, busy: false, error: "" });
+    restoringScroll = null;
     render();
+    const card = [...document.querySelectorAll("#cards .card")].find(el => el.dataset.id === id);
+    card?.querySelector("textarea")?.focus({ preventScroll: true });
+  }
+
+  async function saveEdit(id) {
+    const key = editKey(id);
+    const draft = editDrafts.get(key);
+    if (!draft || draft.busy) return;
+    const scope = scopeQuery().toString();
+    draft.busy = true;
+    draft.error = "";
+    render();
+    try {
+      const updated = await request(`/api/fragments/${encodeURIComponent(id)}?${scope}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: draft.content, remove_unused_thumbnails: true }),
+      });
+      editDrafts.delete(key);
+      if (scope !== scopeQuery().toString()) return;
+      const idx = allFragments.findIndex(f => f.id === id);
+      if (idx !== -1) allFragments[idx] = updated;
+    } catch (error) {
+      draft.busy = false;
+      draft.error = error.message;
+    }
+    if (scope === scopeQuery().toString()) render();
+  }
+
+  document.getElementById("cards").addEventListener("input", e => {
+    if (!e.target.classList.contains("edit-textarea")) return;
+    const draft = editDrafts.get(editKey(e.target.closest(".card").dataset.id));
+    if (draft && !draft.busy) {
+      draft.parts[Number(e.target.dataset.part)].raw = e.target.value;
+      draft.content = serializeEditParts(draft.parts);
+    }
   });
 
-  document.getElementById("edit-overlay").addEventListener("click", e => {
-    if (e.target === document.getElementById("edit-overlay")) hideEdit();
-  });
-
-  document.addEventListener("keydown", e => {
-    if (e.key === "Escape" && document.getElementById("edit-overlay").style.display !== "none") hideEdit();
+  document.getElementById("cards").addEventListener("keydown", e => {
+    if (!e.target.classList.contains("edit-textarea") || e.isComposing) return;
+    const id = e.target.closest(".card").dataset.id;
+    const draft = editDrafts.get(editKey(id));
+    if (!draft || draft.busy) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      editDrafts.delete(editKey(id));
+      render();
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === "Enter" || e.key.toLowerCase() === "s")) {
+      e.preventDefault();
+      saveEdit(id);
+    }
   });
 
   // --- 削除確認ダイアログ ---
@@ -340,9 +885,13 @@
     if (!pendingDeleteId) return;
     const id = pendingDeleteId;
     hideConfirm();
-    await fetch(`/api/fragments/${id}`, { method: "DELETE" });
-    allFragments = allFragments.filter(f => f.id !== id);
-    render();
+    const scope = scopeQuery().toString();
+    try {
+      await request(`/api/fragments/${encodeURIComponent(id)}?${scope}`, { method: "DELETE" });
+      if (scope !== scopeQuery().toString()) return;
+      allFragments = allFragments.filter(f => f.id !== id);
+      render();
+    } catch (error) { showError(error); }
   });
 
   document.getElementById("confirm-overlay").addEventListener("click", e => {
@@ -364,6 +913,68 @@
   });
 
   document.getElementById("cards").addEventListener("click", async e => {
+    if (e.target.classList.contains("move-btn")) {
+      if (currentSource !== "archive" && !editDrafts.has(editKey(e.target.dataset.id))) openMovePicker(e.target);
+      return;
+    }
+    if (e.target.classList.contains("archive-btn") || e.target.classList.contains("restore-btn")) {
+      const action = e.target.classList.contains("restore-btn") ? "restore" : "archive";
+      const id = e.target.dataset.id;
+      if (editDrafts.has(editKey(id))) return;
+      const scope = scopeQuery().toString();
+      const buttons = e.target.closest(".card").querySelectorAll("button");
+      buttons.forEach(button => { button.disabled = true; });
+      try {
+        await request(`/api/fragments/${encodeURIComponent(id)}/${action}?${scope}`, { method: "POST" });
+        if (scope !== scopeQuery().toString()) return;
+        allFragments = allFragments.filter(f => f.id !== id);
+        const tags = [...new Set(allFragments.flatMap(f => f.tags))].sort();
+        renderTagFilters(tags);
+        render();
+        if (action === "restore") await loadFolders();
+      } catch (error) { showError(error); }
+      finally { buttons.forEach(button => { button.disabled = false; }); }
+      return;
+    }
+    if (e.target.classList.contains("repair-images-btn")) {
+      const id = e.target.dataset.id;
+      const fragment = allFragments.find(f => f.id === id);
+      if (!fragment || editDrafts.has(editKey(id))) return;
+      const scope = scopeQuery().toString();
+      e.target.disabled = true;
+      try {
+        const updated = await request(`/api/fragments/${encodeURIComponent(id)}/repair-image-links?${scope}`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: fragment.content }),
+        });
+        if (scope !== scopeQuery().toString()) return;
+        const index = allFragments.findIndex(f => f.id === id);
+        if (index !== -1) allFragments[index] = updated;
+        render();
+      } catch (error) { showError(error); }
+      finally { e.target.disabled = false; }
+      return;
+    }
+    if (e.target.classList.contains("edit-remove-link")) {
+      const draft = editDrafts.get(editKey(e.target.closest(".card").dataset.id));
+      if (draft && !draft.busy) {
+        draft.parts.splice(Number(e.target.dataset.part), 1);
+        draft.parts = draft.parts.reduce((parts, part) => {
+          if (part.type === "text" && parts.at(-1)?.type === "text") parts.at(-1).raw += part.raw;
+          else parts.push(part);
+          return parts;
+        }, []);
+        draft.content = serializeEditParts(draft.parts);
+        render();
+      }
+      return;
+    }
+    if (e.target.classList.contains("edit-save") || e.target.classList.contains("edit-cancel")) {
+      const id = e.target.closest(".card").dataset.id;
+      if (e.target.classList.contains("edit-save")) await saveEdit(id);
+      else if (!editDrafts.get(editKey(id))?.busy) { editDrafts.delete(editKey(id)); render(); }
+      return;
+    }
     if (e.target.classList.contains("fragment-image")) {
       lightboxImg.src = e.target.src;
       lightboxImg.alt = e.target.alt;
@@ -372,11 +983,14 @@
     }
     if (e.target.classList.contains("fav-btn")) {
       const id = e.target.dataset.id;
-      const res = await fetch(`/api/fragments/${id}/favorite?source=${currentSource}`, { method: "PATCH" });
-      const data = await res.json();
-      const frag = allFragments.find(f => f.id === id);
-      if (frag) frag.tags = data.tags;
-      render();
+      const scope = scopeQuery().toString();
+      try {
+        const data = await request(`/api/fragments/${encodeURIComponent(id)}/favorite?${scope}`, { method: "PATCH" });
+        if (scope !== scopeQuery().toString()) return;
+        const frag = allFragments.find(f => f.id === id);
+        if (frag) frag.tags = data.tags;
+        render();
+      } catch (error) { showError(error); }
       return;
     }
     if (e.target.classList.contains("edit-btn")) {
@@ -429,25 +1043,40 @@
     render();
   });
 
-  document.querySelectorAll(".source-tab").forEach(btn => {
-    btn.addEventListener("click", () => {
-      if (btn.dataset.source === currentSource) return;
-      currentSource = btn.dataset.source;
-      document.querySelectorAll(".source-tab").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      activeTags.clear();
-      searchQuery = "";
-      dateFrom = dateTo = "";
-      showFavoritesOnly = false;
-      document.getElementById("search").value = "";
-      document.getElementById("date-from").value = "";
-      document.getElementById("date-to").value = "";
-      document.getElementById("fav-filter-btn").classList.remove("active");
-      load();
-    });
+  function selectFolder(source, folder) {
+    if (composerBusy || folderBusy) return;
+    rememberScrollPosition();
+    closeFolderForm();
+    currentSource = source;
+    currentFolder = folder;
+    rememberFolderSelection();
+    activeTags.clear();
+    renderFolders();
+    load();
+  }
+
+  document.getElementById("archive-link").addEventListener("click", () => {
+    if (composerBusy || folderBusy) return;
+    rememberScrollPosition();
+    currentSource = "archive";
+    currentFolder = "";
+    rememberFolderSelection();
+    activeTags.clear();
+    ++loadVersion;
+    allFragments = [];
+    renderFolders();
+    render();
+    loadFolders();
   });
 
-  load();
+  try {
+    const selection = readFolderSelection();
+    currentSource = selection.source;
+    currentFolder = selection.folder;
+    updateComposer();
+    initComposer();
+    loadFolders();
+  } catch (error) { showError(error); }
 </script>
 </body>
 </html>

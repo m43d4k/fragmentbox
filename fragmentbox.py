@@ -67,18 +67,24 @@ def save_fragment(text: str) -> Path:
     return filepath
 
 
-def import_image(src: Path) -> Path:
+
+def _image_reference(path: Path) -> str:
+    return Path(os.path.relpath(path, INBOX_DIR)).as_posix()
+
+
+def import_image(src: Path, assets_dir: Path | None = None) -> Path:
     """画像をアセットフォルダへ保存する。
     ラスター画像は pyvips で WebP に圧縮、SVG/GIF はそのままコピー。
     """
-    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    assets_dir = ASSETS_DIR if assets_dir is None else assets_dir
+    assets_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     unique = uuid.uuid4().hex[:8]
     suffix = src.suffix.lower()
 
     if suffix in _COPY_ONLY_EXTENSIONS:
         new_name = f"{timestamp}_{unique}{suffix}"
-        dest = ASSETS_DIR / new_name
+        dest = assets_dir / new_name
         shutil.copy2(str(src), str(dest))
         return dest
 
@@ -91,7 +97,7 @@ def import_image(src: Path) -> Path:
         ) from e
 
     new_name = f"{timestamp}_{unique}.webp"
-    dest = ASSETS_DIR / new_name
+    dest = assets_dir / new_name
     image = pyvips.Image.new_from_file(str(src)).autorot()
     image.webpsave(str(dest), Q=IMAGE_QUALITY)
     return dest
@@ -135,7 +141,7 @@ def _fetch_general(url: str) -> dict[str, str]:
 _THUMBNAIL_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
-def _download_thumbnail(image_url: str) -> Path | None:
+def _download_thumbnail(image_url: str, assets_dir: Path | None = None) -> Path | None:
     """サムネイル画像URLをダウンロードし、import_image() で保存する。"""
     import tempfile
     import urllib.request
@@ -174,7 +180,7 @@ def _download_thumbnail(image_url: str) -> Path | None:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         fd = -1
-        return import_image(tmp_path)
+        return import_image(tmp_path, assets_dir)
     except Exception:
         logger.exception("Failed to download thumbnail: %s", image_url)
         return None
@@ -228,7 +234,7 @@ def _insert_metadata(
     if meta.get("description"):
         lines.append(f"description: {meta['description']}")
     if meta.get("thumbnail"):
-        lines.append(f"![](../assets/{meta['thumbnail']})")
+        lines.append(f"![]({_image_reference(ASSETS_DIR / meta['thumbnail'])})")
     if not lines:
         return
 
@@ -330,7 +336,7 @@ def _handle_image_path(
         dest = import_image(path)
         cursor = text_widget.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(f"![](../assets/{dest.name})  \n")
+        cursor.insertText(f"![]({_image_reference(dest)})  \n")
         _set_status(status_label, f"Image: {dest.name}", "#27ae60")
     except Exception as e:
         _set_status(status_label, f"Error: {e}", "#e74c3c")

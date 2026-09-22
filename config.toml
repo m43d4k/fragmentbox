@@ -1,5 +1,7 @@
 [paths]
-inbox   = "~/idea_pool/fragmentbox/inbox"
+root    = "~/idea_pool/fragmentbox"
+active  = "~/idea_pool/fragmentbox/active"
+inbox   = "~/idea_pool/fragmentbox/active/inbox"
 archive = "~/idea_pool/fragmentbox/archive"
 trash   = "~/idea_pool/fragmentbox/Trash"
 assets  = "~/idea_pool/fragmentbox/assets"
@@ -8,7 +10,7 @@ assets  = "~/idea_pool/fragmentbox/assets"
 port = 8765
 
 [tags]
-presets = ["idea", "todo", "ref", "tips", "dtm", "music", "movie", "later"]
+presets = ["idea", "todo", "ref", "tips", "dtm", "music", "movie", "later", "codex"]
 
 [images]
 quality = 80  # WebP 変換時の品質 (1-100)

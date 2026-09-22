@@ -4,7 +4,16 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-fragmentbox — テキストフラグメント（アイデアの断片）をローカルのインボックスに素早く投入するための小さなパーソナルツール。
+fragmentbox — テキスト、画像、URLの断片をMarkdownでローカルに保存し、閲覧・整理するパーソナルツール。
+
+## 変更方針と現行実装
+
+- 合意済みの変更方針は [SPEC.md 第11章](SPEC.md#11-フォルダ分類と手動アーカイブへの変更方針一部実装済み) を参照する。
+- 実ディレクトリを分類の正本とする。ビューアのフォルダ一覧・作成・並び替えは実装済み（SPEC.md第12章）。ビューア下部の投稿欄から選択フォルダへ投稿できる（SPEC.md第13章）。記事単位のアーカイブ・復帰は実装済み（SPEC.md第21章）。通常記事の検索付きフォルダ移動は第22章で実装済み。移動アイコンはArchiveの記事に表示せず、移動先にもArchiveを含めない。
+- アーカイブは所属フォルダと原文を保った移動とする。定期的なAI要約・再編集は運用の前提にしない。
+- `paths.active` 配下の1階層を通常フォルダとし、Inboxも通常フォルダと同列に並べ、統合表示順を `.navigation-order.json` に保存する。Archiveだけ別枠。画面にactiveという親項目は出さない。GUIは引き続きInboxへ投稿する。
+- Trashの方針はSPEC.md第19章を参照する。復元UIは作らず、元の場所・参照画像を記録して手動復元の余地を残す（未実装）。
+- 未決事項はSPEC.mdに記載する。文書更新を理由に、設定や既存データを自動で移行しない。
 
 ## Code Style
 
@@ -41,13 +50,15 @@ FRAGMENTBOX_LOG=DEBUG ./run_fragmentbox.sh
 
 `_download_thumbnail`: `tempfile.mkstemp()` + `os.fdopen()` で書き込む。`Content-Type: image/*` 以外・10 MB 超はスキップ。`trafilatura` の `meta.image` は `urljoin(url, image_url)` で絶対 URL に解決する。
 
-**viewer.py** — FastAPI ビューア（デフォルト :8765）
+**viewer.py** — FastAPI ビューア・投稿API（デフォルト :8765）
+- 投稿と画像添付は `fragmentbox.py` の画像変換・URL情報取得処理を再利用する。保存中は投稿先を固定する。
+- Web投稿は `YYYYMMDD_HHMMSS_ffffff.md` を排他的に作成する。
 - 返り値は Pydantic `BaseModel`（`dict` 禁止）
-- `source` パラメータは `Source = Literal["inbox", "archive"]`
+- `source` パラメータは `Source = Literal["notes", "inbox", "archive"]`
 - `Fragment.created_at` は `datetime` 型
 - 削除時は `IMAGE_PATTERN` で抽出した `../assets/` 参照画像も Trash へ移動
 
-**viewer.html** — Vanilla JS SPA。タグ（AND/OR）・テキスト・日付・お気に入りでクライアントサイドフィルタリング。ANDモードでは、現在の全フィルター条件にタグを追加して0件になる未選択タグを無効化する。カードフッターにお気に入り・編集・削除ボタン。
+**viewer.html** — Vanilla JS SPA。タグ（AND/OR）・テキスト・日付・お気に入りでクライアントサイドフィルタリング。ANDモードでは、現在の全フィルター条件にタグを追加して0件になる未選択タグを無効化する。記事フッターにお気に入り・編集・移動・アーカイブ・削除ボタン。Archive内では移動・アーカイブ・削除を表示せず、復帰ボタンを表示する。
 
 ## Fragment ファイル形式
 
