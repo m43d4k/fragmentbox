@@ -40,11 +40,14 @@
   </div>
 </header>
 
+<div id="tag-filter-slot">
 <div id="tag-filters">
+  <input id="tag-search" type="search" placeholder="タグを検索" aria-label="タグを検索" autocomplete="off">
   <button id="tag-mode-btn" class="tag-mode-btn" title="Toggle AND/OR">AND</button>
   <button id="tag-clear-btn" class="tag-clear-btn is-hidden" disabled aria-hidden="true">✕ Clear</button>
 </div>
 
+</div>
 <div id="fragments">
   <div id="count"></div>
   <div id="cards"></div>
@@ -72,11 +75,11 @@
 </div>
 
 <div id="confirm-overlay" style="display:none">
-  <div id="confirm-dialog">
-    <p id="confirm-message">Move this note to Trash?</p>
+  <div id="confirm-dialog" role="alertdialog" aria-modal="true" aria-describedby="confirm-message">
+    <p id="confirm-message">元に戻せません。</p>
     <div id="confirm-buttons">
       <button id="confirm-cancel">Cancel</button>
-      <button id="confirm-ok">Move to Trash</button>
+      <button id="confirm-ok">完全に削除</button>
     </div>
   </div>
 </div>
@@ -287,6 +290,13 @@
       button.addEventListener("click", () => {
         selectFolder(folder.source, folder.folder);
       });
+      if (folder.source === "notes") {
+        button.addEventListener("contextmenu", event => {
+          event.preventDefault();
+          if (!folderBusy && !composerBusy) openFolderMenu(button, folder);
+        });
+        button.title += "。右クリックで名前変更・削除";
+      }
       button.addEventListener("dragstart", e => {
         draggedFolder = folder.id;
         e.dataTransfer.setData("text/plain", folder.id);
@@ -309,6 +319,79 @@
       list.appendChild(button);
     });
   }
+
+  function changeFolderState(oldName, newName) {
+    rememberScrollPosition();
+    for (const source of ["notes", "archive"]) {
+      const oldScope = new URLSearchParams({ source, folder: oldName }).toString();
+      const newScope = new URLSearchParams({ source, folder: newName || "" }).toString();
+      if (folderScrollPositions.has(oldScope)) {
+        if (newName) folderScrollPositions.set(newScope, folderScrollPositions.get(oldScope));
+        if (newName || source === "notes") folderScrollPositions.delete(oldScope);
+      }
+      for (const [key, draft] of [...editDrafts]) {
+        const [scope, id] = JSON.parse(key);
+        if (scope !== oldScope || (!newName && source === "archive")) continue;
+        editDrafts.delete(key);
+        if (newName) editDrafts.set(JSON.stringify([newScope, id]), draft);
+      }
+    }
+    if (currentFolder === oldName && (currentSource === "notes" || (newName && currentSource === "archive"))) {
+      currentFolder = newName || "";
+      if (!newName) { currentSource = "inbox"; activeTags.clear(); }
+      rememberFolderSelection();
+    }
+  }
+
+  function openFolderMenu(button, folder) {
+    document.querySelector(".folder-menu")?.remove();
+    const menu = document.createElement("div");
+    menu.className = "folder-menu";
+    menu.innerHTML = `<button type="button">名前を変更</button><button type="button">フォルダを削除</button>`;
+    document.body.appendChild(menu);
+    const rect = button.getBoundingClientRect();
+    menu.style.left = `${Math.min(rect.left, window.innerWidth - 200)}px`;
+    menu.style.top = `${Math.min(rect.bottom, window.innerHeight - 100)}px`;
+    const [rename, remove] = menu.querySelectorAll("button");
+    rename.addEventListener("click", async () => {
+      menu.remove();
+      const name = window.prompt("新しいフォルダ名（Archive内の同名フォルダも変更します）", folder.name);
+      if (name === null || name === folder.name) return;
+      folderBusy = true;
+      renderFolders();
+      try {
+        await request(`/api/folders/${encodeURIComponent(folder.name)}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+        });
+        changeFolderState(folder.name, name);
+        await loadFolders();
+      } catch (error) { showError(error); }
+      finally { folderBusy = false; renderFolders(); }
+    });
+    remove.addEventListener("click", async () => {
+      menu.remove();
+      folderBusy = true;
+      renderFolders();
+      try {
+        const preview = await request(`/api/folders/${encodeURIComponent(folder.name)}/delete-preview`);
+        if (!await confirmFolderDeletion(`「${folder.name}」と記事${preview.count}件を完全に削除します。元に戻せません。`)) return;
+        await request(`/api/folders/${encodeURIComponent(folder.name)}`, {
+          method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revision: preview.revision }),
+        });
+        changeFolderState(folder.name, null);
+        await loadFolders();
+      } catch (error) { showError(error); }
+      finally { folderBusy = false; renderFolders(); }
+    });
+    menu.addEventListener("keydown", event => {
+      if (event.key === "Escape") { menu.remove(); button.focus(); }
+    });
+    rename.focus();
+  }
+
+  document.addEventListener("click", event => {
+    if (!event.target.closest(".folder-menu")) document.querySelector(".folder-menu")?.remove();
+  });
 
   async function moveFolder(name, target) {
     if (composerBusy || folderBusy || target < 0 || target >= folders.length) return;
@@ -399,6 +482,14 @@
 
   function applyScrollPosition() {
     if (!restoringScroll || restoringScroll.key !== displayedScrollKey) return;
+    if (restoringScroll.anchor) {
+      const card = [...document.querySelectorAll("#cards > .card")].find(card => card.dataset.id === restoringScroll.anchor.id);
+      if (card) {
+        viewerScroll.scrollTop += card.getBoundingClientRect().top - visibleArticleTop() - restoringScroll.anchor.offset;
+        restoringScroll.position = viewerScroll.scrollTop;
+        return;
+      }
+    }
     viewerScroll.scrollTop = restoringScroll.position === null
       ? viewerScroll.scrollHeight : restoringScroll.position;
   }
@@ -417,8 +508,90 @@
     viewerScroll.addEventListener(event, () => { restoringScroll = null; }, { passive: true });
   }
 
+  function tagScrollState(state, delta, hidden, restoring) {
+    if (!hidden) return { direction: 0, distance: 0, visible: false };
+    if (restoring) return { direction: 0, distance: 0, visible: state.visible };
+    if (!delta) return state;
+    const direction = Math.sign(delta);
+    const distance = (direction === state.direction ? state.distance : 0) + Math.abs(delta);
+    let visible = state.visible;
+    if (direction < 0 && distance >= 24) visible = true;
+    if (direction > 0 && distance >= 300) visible = false;
+    return { direction, distance: Math.min(distance, 300), visible };
+  }
+
+  const tagFilterSlot = document.getElementById("tag-filter-slot");
+  const tagFilterBar = document.getElementById("tag-filters");
+  let tagScroll = { direction: 0, distance: 0, visible: false };
+  let lastTagScrollTop = viewerScroll.scrollTop;
+
+  let tagSlideAnimation = null;
+  let floatingTagsVisible = false;
+
+  function clearFloatingTags() {
+    tagFilterBar.classList.remove("is-floating");
+    tagFilterBar.style.removeProperty("top");
+    tagFilterBar.style.removeProperty("left");
+    tagFilterBar.style.removeProperty("width");
+    tagFilterSlot.style.removeProperty("height");
+  }
+
+  function positionFloatingTags(visible, immediate = false) {
+    if (immediate) {
+      tagSlideAnimation?.cancel();
+      tagSlideAnimation = null;
+      floatingTagsVisible = false;
+      clearFloatingTags();
+      return;
+    }
+    if (visible === floatingTagsVisible) return;
+    floatingTagsVisible = visible;
+    const wasFloating = tagFilterBar.classList.contains("is-floating");
+    const from = tagSlideAnimation ? getComputedStyle(tagFilterBar).transform
+      : visible ? "translateY(-100%)" : "translateY(0)";
+    tagSlideAnimation?.cancel();
+    if (visible) {
+      if (!wasFloating) tagFilterSlot.style.height = `${tagFilterBar.getBoundingClientRect().height}px`;
+      const viewport = viewerScroll.getBoundingClientRect();
+      const header = viewerScroll.querySelector("header").getBoundingClientRect();
+      tagFilterBar.style.top = `${header.bottom}px`;
+      tagFilterBar.style.left = `${viewport.left}px`;
+      tagFilterBar.style.width = `${viewerScroll.clientWidth}px`;
+      tagFilterBar.classList.add("is-floating");
+    }
+    const animation = tagFilterBar.animate(
+      [{ transform: from }, { transform: visible ? "translateY(0)" : "translateY(-100%)" }],
+      { duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180, easing: "ease-out", fill: "forwards" },
+    );
+    tagSlideAnimation = animation;
+    animation.onfinish = () => {
+      if (tagSlideAnimation !== animation) return;
+      if (!floatingTagsVisible) clearFloatingTags();
+      animation.cancel();
+      tagSlideAnimation = null;
+    };
+  }
+
+  function resetFloatingTags() {
+    tagScroll = { direction: 0, distance: 0, visible: false };
+    positionFloatingTags(false, true);
+    lastTagScrollTop = viewerScroll.scrollTop;
+  }
+
+  viewerScroll.addEventListener("scroll", () => {
+    const current = Math.max(0, viewerScroll.scrollTop);
+    const delta = current - lastTagScrollTop;
+    lastTagScrollTop = current;
+    const hidden = tagFilterSlot.getBoundingClientRect().bottom <= viewerScroll.querySelector("header").getBoundingClientRect().bottom;
+    tagScroll = tagScrollState(tagScroll, delta, hidden, Boolean(restoringScroll));
+    positionFloatingTags(tagScroll.visible, !hidden);
+  }, { passive: true });
+  window.addEventListener("resize", resetFloatingTags);
+
   // --- データ取得 ---
   async function load() {
+    resetFloatingTags();
+    closeTagSuggestions();
     rememberScrollPosition();
     const version = ++loadVersion;
     allFragments = [];
@@ -438,6 +611,30 @@
     } catch (error) { if (version === loadVersion) showError(error); }
   }
 
+  function visibleArticleTop() {
+    const viewport = viewerScroll.getBoundingClientRect();
+    const header = document.querySelector("#viewer-scroll > header");
+    const floatingTags = document.querySelector("#tag-filters.is-floating");
+    return Math.max(viewport.top, header ? header.getBoundingClientRect().bottom : viewport.top, floatingTags ? floatingTags.getBoundingClientRect().bottom : viewport.top);
+  }
+
+  function renderTagChange() {
+    const top = visibleArticleTop();
+    const bottom = viewerScroll.getBoundingClientRect().bottom;
+    const ids = new Set(filtered().map(fragment => fragment.id));
+    const cards = [...document.querySelectorAll("#cards > .card")];
+    const card = cards.find(card => {
+      const bounds = card.getBoundingClientRect();
+      return ids.has(card.dataset.id) && bounds.bottom > top && bounds.top < bottom;
+    });
+    const anchor = card ? { id: card.dataset.id, offset: card.getBoundingClientRect().top - top } : null;
+    const position = viewerScroll.scrollTop;
+    restoringScroll = null;
+    render();
+    restoringScroll = { key: displayedScrollKey, position, anchor };
+    applyScrollPosition();
+  }
+
   // --- タグフィルターボタン ---
   function renderTagFilters(tags) {
     const container = document.getElementById("tag-filters");
@@ -448,6 +645,12 @@
       btn.className = "tag-btn";
       btn.textContent = `#${tag}`;
       btn.dataset.tag = tag;
+      btn.classList.toggle("active", activeTags.has(tag));
+      btn.title = "右クリックでタグ名を変更";
+      btn.addEventListener("contextmenu", event => {
+        event.preventDefault();
+        openTagRename(btn, tag);
+      });
       btn.addEventListener("click", () => {
         if (activeTags.has(tag)) {
           activeTags.delete(tag);
@@ -456,9 +659,84 @@
           activeTags.add(tag);
           btn.classList.add("active");
         }
-        render();
+        renderTagChange();
       });
       container.appendChild(btn);
+    });
+    applyTagSearch();
+  }
+
+  function tagMatchesSearch(tag, query, selected) {
+    const term = query.trim().replace(/^#/, "").toLocaleLowerCase();
+    return selected || tag.toLocaleLowerCase().includes(term);
+  }
+
+  function applyTagSearch() {
+    const query = document.getElementById("tag-search").value;
+    document.querySelectorAll("#tag-filters .tag-btn").forEach(button => {
+      button.hidden = !tagMatchesSearch(button.dataset.tag, query, activeTags.has(button.dataset.tag));
+    });
+  }
+
+  document.getElementById("tag-search").addEventListener("input", applyTagSearch);
+  document.getElementById("tag-search").addEventListener("keydown", event => {
+    if (event.key === "Escape" && !event.isComposing) {
+      event.preventDefault();
+      event.target.value = "";
+      applyTagSearch();
+    }
+  });
+
+  function openTagRename(trigger, tag) {
+    if (folderBusy || composerBusy || (currentSource !== "inbox" && !currentFolder)) return;
+    const folder = currentFolder || "inbox";
+    const scopes = [new URLSearchParams({ source: folder === "inbox" ? "inbox" : "notes", folder: folder === "inbox" ? "" : folder }).toString(), new URLSearchParams({ source: "archive", folder }).toString()];
+    if ([...editDrafts.keys()].some(key => scopes.includes(JSON.parse(key)[0]))) {
+      showError(new Error("対象フォルダの記事の編集を保存または取り消してから、タグ名を変更してください"));
+      return;
+    }
+    document.querySelector(".tag-rename-panel")?.remove();
+    const panel = document.createElement("form");
+    panel.className = "tag-rename-panel";
+    panel.innerHTML = `<div>タグ名を変更</div><div class="tag-rename-scope"></div><input aria-label="新しいタグ名" required pattern="[\\p{L}\\p{N}_]+"><div><button type="submit">変更</button><button type="button">取消</button></div><div role="alert"></div>`;
+    panel.querySelector(".tag-rename-scope").textContent = `${folder} と同名のArchive内の記事が対象です。`;
+    const input = panel.querySelector("input");
+    input.value = tag;
+    document.body.appendChild(panel);
+    const rect = trigger.getBoundingClientRect();
+    panel.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 310))}px`;
+    panel.style.top = `${Math.max(8, Math.min(rect.bottom, window.innerHeight - 190))}px`;
+    input.focus();
+    input.select();
+    const cancel = panel.querySelector('button[type="button"]');
+    cancel.addEventListener("click", () => { panel.remove(); trigger.focus(); });
+    panel.addEventListener("keydown", event => {
+      if (event.key === "Escape" && !folderBusy) { panel.remove(); trigger.focus(); }
+    });
+    const scope = scopeQuery().toString();
+    panel.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (folderBusy || composerBusy) return;
+      if (scope !== scopeQuery().toString()) { panel.remove(); return; }
+      folderBusy = true;
+      panel.querySelectorAll("input, button").forEach(el => { el.disabled = true; });
+      renderFolders();
+      try {
+        const result = await request(`/api/tags/rename?${scope}`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ old: tag, new: input.value }),
+        });
+        if (activeTags.delete(tag)) activeTags.add(result.new);
+        closeTagSuggestions();
+        panel.remove();
+        await load();
+        showError(new Error(`${result.count}件の記事のタグ名を変更しました。`));
+      } catch (error) { panel.querySelector('[role="alert"]').textContent = error.message; }
+      finally {
+        folderBusy = false;
+        panel.querySelectorAll("input, button").forEach(el => { el.disabled = false; });
+        renderFolders();
+      }
     });
   }
 
@@ -564,15 +842,17 @@
         }
 
         if (title) {
-          let html = `<div class="url-block">`;
+          let html = `<div class="url-source"><a class="url" href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(url)}</a></div><div class="url-block">`;
           if (sitename)    html += `<div class="line-meta">${escapeHtml(sitename)}</div>`;
           html += `<a class="url-title" href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>`;
           if (description) html += `<div class="line-meta description">${escapeHtml(description)}</div>`;
-          // メタデータ直後の画像1枚を、このリンクのサムネイルとしてまとめる。
-          if (j < lines.length && /^!\[[^\]]*\]\([^)]+\)$/.test(lines[j])) {
-            html += renderLine(lines[j], imageLinks, repairId);
+          // メタデータ直後の連続画像を同じリンクにまとめる。
+          const thumbnails = [];
+          while (j < lines.length && /^!\[[^\]]*\]\([^)]+\)$/.test(lines[j])) {
+            thumbnails.push(`<div class="link-thumbnail">${renderLine(lines[j], imageLinks, repairId)}</div>`);
             j++;
           }
+          if (thumbnails.length) html += `<div class="link-thumbnails${thumbnails.length > 1 ? " multiple" : ""}">${thumbnails.join("")}</div>`;
           html += `</div>`;
           result.push(html);
           lastWasEmpty = false;
@@ -614,7 +894,7 @@
         }
       }
       if (hasTitle) {
-        if (j < lines.length && /^!\[[^\]]*\]\([^)]+\)$/.test(lines[j].trim())) j++;
+        while (j < lines.length && /^!\[[^\]]*\]\([^)]+\)$/.test(lines[j].trim())) j++;
         parts.push({ type: "text", raw: text });
         parts.push({ type: "link", raw: lines.slice(i, j).join("") });
         text = "";
@@ -680,9 +960,7 @@
     }
     empty.style.display = "none";
 
-    const trashIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
     const editIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
-    const archiveIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><rect x="3" y="3" width="18" height="4"/><path d="M5 7v14h14V7M12 10v7m-3-3 3 3 3-3"/></svg>`;
     const restoreIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><path d="M3 10h11a7 7 0 0 1 0 14" transform="translate(0 -3)"/><path d="m8 2-5 5 5 5"/></svg>`;
     let previousDate = null;
     cards.innerHTML = frags.map(f => {
@@ -693,21 +971,20 @@
       const isFav = f.tags.includes("favorite");
       const favBtn = `<button class="fav-btn${isFav ? " active" : ""}" data-id="${escapeHtml(f.id)}" title="Toggle favorite">♥</button>`;
       const editBtn = `<button class="edit-btn" data-id="${escapeHtml(f.id)}" title="Edit">${editIcon}</button>`;
-      const archiveBtn = currentSource !== "archive"
-        ? `<button class="archive-btn" data-id="${escapeHtml(f.id)}" title="アーカイブへ移動" aria-label="アーカイブへ移動">${archiveIcon}</button>`
+      const actions = currentSource !== "archive"
+        ? `<div class="article-actions"><button type="button" class="article-menu-btn" data-id="${escapeHtml(f.id)}" aria-label="記事の操作" aria-haspopup="menu" aria-expanded="false" title="記事の操作"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="pointer-events:none"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg></button><div class="article-menu" role="menu" hidden>
+            <button type="button" role="menuitem" class="move-btn" data-id="${escapeHtml(f.id)}">別のフォルダへ移動</button>
+            <button type="button" role="menuitem" class="archive-btn" data-id="${escapeHtml(f.id)}">アーカイブ</button>
+            <button type="button" role="menuitem" class="delete-btn" data-id="${escapeHtml(f.id)}">削除</button>
+          </div></div>`
         : `<button class="restore-btn" data-id="${escapeHtml(f.id)}" title="元のフォルダに戻す" aria-label="元のフォルダに戻す">${restoreIcon}</button>`;
-      const moveBtn = currentSource !== "archive"
-        ? `<button class="move-btn" data-id="${escapeHtml(f.id)}" title="別のフォルダへ移動" aria-label="別のフォルダへ移動"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="pointer-events:none"><path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/><path d="M8 14h8m-3-3 3 3-3 3"/></svg></button>` : "";
-      const delBtn = currentSource !== "archive"
-        ? `<button class="delete-btn" data-id="${escapeHtml(f.id)}" title="Move to Trash">${trashIcon}</button>`
-        : "";
       return `
         ${separator}
         <div class="card" data-id="${escapeHtml(f.id)}">
+          <div class="card-datetime">${formatDatetime(f.created_at)}</div>
           <div class="card-body">${renderArticleBody(f)}</div>
           <div class="card-footer">
-            <span class="card-datetime">${formatDatetime(f.created_at)}</span>
-            ${editDrafts.has(editKey(f.id)) ? "" : favBtn + editBtn + moveBtn + archiveBtn + delBtn}
+            ${editDrafts.has(editKey(f.id)) ? "" : favBtn + editBtn + actions}
           </div>
         </div>
       `;
@@ -728,7 +1005,7 @@
     const picker = document.createElement("div");
     picker.className = "move-picker";
     picker.innerHTML = `<input type="search" placeholder="フォルダを検索" aria-label="移動先フォルダを検索" role="combobox" aria-expanded="true" aria-controls="move-options" aria-autocomplete="list"><div id="move-options" role="listbox" aria-label="移動先フォルダ"></div><div class="move-error" role="alert"></div>`;
-    trigger.parentElement.appendChild(picker);
+    trigger.closest(".card-footer").appendChild(picker);
     const viewport = document.getElementById("viewer-scroll").getBoundingClientRect();
     if (trigger.getBoundingClientRect().top - viewport.top < 260) {
       picker.style.bottom = "auto";
@@ -802,7 +1079,33 @@
     input.focus();
   }
 
+  function closeArticleMenus() {
+    document.querySelectorAll(".article-menu").forEach(menu => { menu.hidden = true; });
+    document.querySelectorAll(".article-menu-btn").forEach(button => button.setAttribute("aria-expanded", "false"));
+  }
+
   // --- 記事内編集 ---
+  document.addEventListener("click", event => {
+    if (!event.target.closest(".article-actions")) closeArticleMenus();
+  });
+  document.getElementById("cards").addEventListener("keydown", event => {
+    const actions = event.target.closest(".article-actions");
+    if (!actions) return;
+    const trigger = actions.querySelector(".article-menu-btn");
+    const menu = actions.querySelector(".article-menu");
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeArticleMenus();
+      trigger.focus();
+    } else if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault();
+      if (menu.hidden) { trigger.click(); return; }
+      const items = [...menu.querySelectorAll("button")];
+      const index = items.indexOf(document.activeElement);
+      items[(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
+    } else if (event.key === "Tab") closeArticleMenus();
+  });
+
   document.addEventListener("click", event => {
     if (!event.target.closest(".move-picker, .move-btn")) document.querySelector(".move-picker")?.remove();
   });
@@ -811,11 +1114,133 @@
   function showEdit(id, content) {
     const key = editKey(id);
     if (!editDrafts.has(key)) editDrafts.set(key, { content, busy: false, error: "" });
-    restoringScroll = null;
-    render();
+    renderTagChange();
     const card = [...document.querySelectorAll("#cards .card")].find(el => el.dataset.id === id);
     card?.querySelector("textarea")?.focus({ preventScroll: true });
   }
+
+  function editTagCompletion(value, start, end, fragments) {
+    if (start !== end) return null;
+    const match = value.slice(0, start).match(/(?:^|\s)#([\p{L}\p{N}_]*)$/u);
+    if (!match) return null;
+    const query = match[1].toLocaleLowerCase();
+    const tags = [...new Set(fragments.flatMap(fragment => fragment.tags))]
+      .filter(tag => tag.toLocaleLowerCase().startsWith(query))
+      .sort((a, b) => a.localeCompare(b));
+    const suffix = value.slice(start).match(/^[\p{L}\p{N}_]*/u)[0];
+    return { start: start - match[1].length - 1, end: start + suffix.length, tags };
+  }
+
+  let tagSuggestionState = null;
+
+  function closeTagSuggestions() {
+    if (!tagSuggestionState) return;
+    tagSuggestionState.popup.remove();
+    tagSuggestionState.input.removeAttribute("aria-controls");
+    tagSuggestionState.input.removeAttribute("aria-activedescendant");
+    tagSuggestionState = null;
+  }
+
+  function selectTagSuggestion() {
+    const state = tagSuggestionState;
+    if (!state || !state.input.isConnected || state.input.disabled) return;
+    const tag = state.completion.tags[state.index];
+    state.input.setRangeText(`#${tag}`, state.completion.start, state.completion.end, "end");
+    const input = state.input;
+    closeTagSuggestions();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    closeTagSuggestions();
+    input.focus({ preventScroll: true });
+  }
+
+  function paintTagSuggestions() {
+    const state = tagSuggestionState;
+    state.popup.replaceChildren();
+    state.completion.tags.forEach((tag, index) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.id = `edit-tag-option-${index}`;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(index === state.index));
+      option.textContent = `#${tag}`;
+      option.addEventListener("mousedown", event => event.preventDefault());
+      option.addEventListener("click", () => { state.index = index; selectTagSuggestion(); });
+      state.popup.appendChild(option);
+    });
+    state.input.setAttribute("aria-activedescendant", `edit-tag-option-${state.index}`);
+  }
+
+  function updateTagSuggestions(input) {
+    closeTagSuggestions();
+    if (input.disabled || !input.isConnected || (input === postText && (folderBusy || !canPost()))) return;
+    const completion = editTagCompletion(input.value, input.selectionStart, input.selectionEnd, allFragments);
+    if (!completion || !completion.tags.length) return;
+    const popup = document.createElement("div");
+    popup.className = "edit-tag-suggestions";
+    popup.id = "edit-tag-options";
+    popup.setAttribute("role", "listbox");
+    popup.setAttribute("aria-label", "このフォルダのタグ候補");
+    input.insertAdjacentElement("afterend", popup);
+    input.setAttribute("aria-controls", popup.id);
+    tagSuggestionState = { input, popup, completion, index: 0 };
+    paintTagSuggestions();
+  }
+
+  document.getElementById("cards").addEventListener("compositionstart", closeTagSuggestions);
+  document.getElementById("cards").addEventListener("compositionend", event => {
+    if (event.target.classList.contains("edit-textarea")) updateTagSuggestions(event.target);
+  });
+  document.getElementById("cards").addEventListener("click", event => {
+    if (event.target.classList.contains("edit-textarea")) updateTagSuggestions(event.target);
+  });
+  document.addEventListener("focusin", event => {
+    if (tagSuggestionState && event.target !== tagSuggestionState.input
+        && !tagSuggestionState.popup.contains(event.target)) closeTagSuggestions();
+  });
+  document.addEventListener("pointerdown", event => {
+    if (tagSuggestionState && event.target !== tagSuggestionState.input
+        && !tagSuggestionState.popup.contains(event.target)) closeTagSuggestions();
+  });
+  document.getElementById("cards").addEventListener("keyup", event => {
+    if (event.target.classList.contains("edit-textarea") && !event.isComposing
+        && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) updateTagSuggestions(event.target);
+  });
+
+  function handleTagSuggestionKey(e) {
+    if (e.isComposing || e.target.disabled) return false;
+    const suggestions = tagSuggestionState;
+    if (suggestions && suggestions.input === e.target && suggestions.popup.isConnected) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeTagSuggestions();
+        return true;
+      }
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && ["ArrowUp", "ArrowDown", "Enter"].includes(e.key)) {
+        e.preventDefault();
+        if (e.key === "Enter") selectTagSuggestion();
+        else {
+          suggestions.index = (suggestions.index + (e.key === "ArrowDown" ? 1 : -1) + suggestions.completion.tags.length) % suggestions.completion.tags.length;
+          paintTagSuggestions();
+          suggestions.popup.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+        }
+        return true;
+      }
+      if (e.key === "Tab") closeTagSuggestions();
+    }
+    return false;
+  }
+
+  postText.addEventListener("input", event => {
+    if (!event.isComposing) updateTagSuggestions(postText);
+  });
+  postText.addEventListener("compositionstart", closeTagSuggestions);
+  postText.addEventListener("compositionend", () => updateTagSuggestions(postText));
+  postText.addEventListener("click", () => updateTagSuggestions(postText));
+  postText.addEventListener("keyup", event => {
+    if (!event.isComposing && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) updateTagSuggestions(postText);
+  });
+  postText.addEventListener("keydown", handleTagSuggestionKey);
+  document.getElementById("composer").addEventListener("submit", closeTagSuggestions);
 
   async function saveEdit(id) {
     const key = editKey(id);
@@ -829,12 +1254,13 @@
       const updated = await request(`/api/fragments/${encodeURIComponent(id)}?${scope}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: draft.content, remove_unused_thumbnails: true }),
+        body: JSON.stringify({ content: draft.content, remove_unused_thumbnails: true, enrich_links: true }),
       });
       editDrafts.delete(key);
       if (scope !== scopeQuery().toString()) return;
       const idx = allFragments.findIndex(f => f.id === id);
       if (idx !== -1) allFragments[idx] = updated;
+      if (updated.warnings?.length) showError(new Error(`保存しました。${updated.warnings.join(" / ")}`));
     } catch (error) {
       draft.busy = false;
       draft.error = error.message;
@@ -848,6 +1274,7 @@
     if (draft && !draft.busy) {
       draft.parts[Number(e.target.dataset.part)].raw = e.target.value;
       draft.content = serializeEditParts(draft.parts);
+      if (!e.isComposing) updateTagSuggestions(e.target);
     }
   });
 
@@ -856,6 +1283,7 @@
     const id = e.target.closest(".card").dataset.id;
     const draft = editDrafts.get(editKey(id));
     if (!draft || draft.busy) return;
+    if (handleTagSuggestionKey(e)) return;
     if (e.key === "Escape") {
       e.preventDefault();
       editDrafts.delete(editKey(id));
@@ -868,13 +1296,30 @@
 
   // --- 削除確認ダイアログ ---
   let pendingDeleteId = null;
+  let pendingDeleteScope = null;
+  let resolveFolderConfirmation = null;
+
+  function confirmFolderDeletion(message) {
+    hideConfirm();
+    document.getElementById("confirm-message").textContent = message;
+    document.getElementById("confirm-overlay").style.display = "flex";
+    document.getElementById("confirm-cancel").focus();
+    return new Promise(resolve => { resolveFolderConfirmation = resolve; });
+  }
 
   function showConfirm(id) {
     pendingDeleteId = id;
+    pendingDeleteScope = scopeQuery().toString();
+    document.getElementById("confirm-message").textContent = "元に戻せません。";
     document.getElementById("confirm-overlay").style.display = "flex";
   }
 
   function hideConfirm() {
+    if (resolveFolderConfirmation) {
+      const resolve = resolveFolderConfirmation;
+      resolveFolderConfirmation = null;
+      resolve(false);
+    }
     pendingDeleteId = null;
     document.getElementById("confirm-overlay").style.display = "none";
   }
@@ -882,10 +1327,17 @@
   document.getElementById("confirm-cancel").addEventListener("click", hideConfirm);
 
   document.getElementById("confirm-ok").addEventListener("click", async () => {
+    if (resolveFolderConfirmation) {
+      const resolve = resolveFolderConfirmation;
+      resolveFolderConfirmation = null;
+      hideConfirm();
+      resolve(true);
+      return;
+    }
     if (!pendingDeleteId) return;
     const id = pendingDeleteId;
+    const scope = pendingDeleteScope;
     hideConfirm();
-    const scope = scopeQuery().toString();
     try {
       await request(`/api/fragments/${encodeURIComponent(id)}?${scope}`, { method: "DELETE" });
       if (scope !== scopeQuery().toString()) return;
@@ -896,6 +1348,15 @@
 
   document.getElementById("confirm-overlay").addEventListener("click", e => {
     if (e.target === document.getElementById("confirm-overlay")) hideConfirm();
+  });
+
+  document.getElementById("confirm-overlay").addEventListener("keydown", event => {
+    if (event.key === "Escape") { event.preventDefault(); hideConfirm(); }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      const next = document.activeElement === document.getElementById("confirm-cancel") ? "confirm-ok" : "confirm-cancel";
+      document.getElementById(next).focus();
+    }
   });
 
   // --- ライトボックス ---
@@ -913,8 +1374,23 @@
   });
 
   document.getElementById("cards").addEventListener("click", async e => {
+    if (e.target.classList.contains("article-menu-btn")) {
+      const menu = e.target.parentElement.querySelector(".article-menu");
+      const opening = menu.hidden;
+      closeArticleMenus();
+      if (opening) {
+        menu.hidden = false;
+        e.target.setAttribute("aria-expanded", "true");
+        const viewport = viewerScroll.getBoundingClientRect();
+        const above = e.target.getBoundingClientRect().top - visibleArticleTop();
+        menu.classList.toggle("below", above < menu.offsetHeight && viewport.bottom - e.target.getBoundingClientRect().bottom > menu.offsetHeight);
+        menu.querySelector("button").focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (e.target.closest(".article-menu")) closeArticleMenus();
     if (e.target.classList.contains("move-btn")) {
-      if (currentSource !== "archive" && !editDrafts.has(editKey(e.target.dataset.id))) openMovePicker(e.target);
+      if (currentSource !== "archive" && !editDrafts.has(editKey(e.target.dataset.id))) openMovePicker(e.target.closest(".card-footer").querySelector(".article-menu-btn"));
       return;
     }
     if (e.target.classList.contains("archive-btn") || e.target.classList.contains("restore-btn")) {
@@ -989,7 +1465,7 @@
         if (scope !== scopeQuery().toString()) return;
         const frag = allFragments.find(f => f.id === id);
         if (frag) frag.tags = data.tags;
-        render();
+        renderTagChange();
       } catch (error) { showError(error); }
       return;
     }
@@ -1008,7 +1484,7 @@
     activeTags.add(tag);
     const btn = document.querySelector(`.tag-btn[data-tag="${tag}"]`);
     if (btn) btn.classList.add("active");
-    render();
+    renderTagChange();
   });
 
   document.getElementById("search").addEventListener("input", e => {
@@ -1028,7 +1504,7 @@
   document.getElementById("tag-clear-btn").addEventListener("click", () => {
     activeTags.clear();
     document.querySelectorAll(".tag-btn.active").forEach(b => b.classList.remove("active"));
-    render();
+    renderTagChange();
   });
 
   document.getElementById("tag-mode-btn").addEventListener("click", () => {

@@ -228,18 +228,15 @@ class TestFolders(unittest.TestCase):
             viewer.update_fragment("link", viewer.FragmentUpdate(content="changed"), "notes", "folder")
         self.assertEqual((self.root / "outside.md").read_text(), "original")
 
-    def test_delete_targets_selected_folder_and_rejects_trash_collision(self):
+    def test_delete_targets_selected_folder(self):
         for name in ("a", "b"):
             (self.root / name).mkdir()
             (self.root / name / "same.md").write_text(name)
-        trash = self.root / "trash"
-        with patch.object(viewer, "TRASH_DIR", trash):
-            viewer.delete_fragment("same", "notes", "a")
-            self.assertEqual((trash / "same.md").read_text(), "a")
-            with self.assertRaises(HTTPException) as ctx:
-                viewer.delete_fragment("same", "notes", "b")
-            self.assertEqual(ctx.exception.status_code, 409)
-            self.assertEqual((self.root / "b/same.md").read_text(), "b")
+        viewer.delete_fragment("same", "notes", "a")
+        self.assertFalse((self.root / "a/same.md").exists())
+        self.assertEqual((self.root / "b/same.md").read_text(), "b")
+        viewer.delete_fragment("same", "notes", "b")
+        self.assertFalse((self.root / "b/same.md").exists())
 
 
 
@@ -350,11 +347,11 @@ class TestNavigation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             with patch.multiple(viewer, ACTIVE_DIR=root, ROOT_DIR=root, INBOX_DIR=root/"inbox", ARCHIVE_DIR=root/"archive",
-                                ASSETS_DIR=root/"assets", TRASH_DIR=root/"Trash"):
-                for name in ("inbox", "archive", "assets", "Trash", "notes", "Music"):
+                                ASSETS_DIR=root/"assets"):
+                for name in ("inbox", "archive", "assets", "notes", "Music"):
                     (root/name).mkdir()
                 self.assertEqual([e.name for e in viewer.get_navigation()], ["inbox", "Music"])
-                for name in ("archive", "assets", "Trash", "inbox", "notes"):
+                for name in ("archive", "assets", "inbox", "notes"):
                     with self.subTest(name=name), self.assertRaises(HTTPException):
                         viewer.create_folder(viewer.FolderCreate(name=name))
                     with self.assertRaises(HTTPException):
@@ -363,7 +360,7 @@ class TestNavigation(unittest.TestCase):
 
 
 class TestRemoveThumbnail(unittest.TestCase):
-    def test_removed_card_thumbnail_moves_to_trash_unless_shared(self):
+    def test_removed_card_thumbnail_is_deleted_unless_shared(self):
         for shared in (False, True):
             with self.subTest(shared=shared), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -376,12 +373,11 @@ class TestRemoveThumbnail(unittest.TestCase):
                 note.write_text('text\nhttps://example.com\ntitle: Example\n![](../assets/thumb.webp)  \n')
                 if shared:
                     (archive/'other.md').write_text('![](../assets/thumb.webp)')
-                with patch.multiple(viewer, ACTIVE_DIR=root, ROOT_DIR=root, INBOX_DIR=inbox, ASSETS_DIR=assets, ARCHIVE_DIR=archive, TRASH_DIR=trash):
+                with patch.multiple(viewer, ACTIVE_DIR=root, ROOT_DIR=root, INBOX_DIR=inbox, ASSETS_DIR=assets, ARCHIVE_DIR=archive):
                     viewer.update_fragment('test', viewer.FragmentUpdate(content='text', remove_unused_thumbnails=True))
                 self.assertEqual(image.exists(), shared)
                 self.assertEqual(note.read_text(), 'text')
-                if not shared:
-                    self.assertEqual(len(list(trash.rglob('thumb.webp'))), 1)
+                self.assertFalse(trash.exists())
 
 
 
@@ -398,7 +394,7 @@ class TestActiveLayout(unittest.TestCase):
             image = assets/'image.webp'
             image.write_bytes(b'image')
             with patch.multiple(viewer, ROOT_DIR=root, ACTIVE_DIR=active, INBOX_DIR=active/'inbox',
-                                ASSETS_DIR=assets, ARCHIVE_DIR=root/'archive', TRASH_DIR=root/'Trash'):
+                                ASSETS_DIR=assets, ARCHIVE_DIR=root/'archive'):
                 viewer.create_folder(viewer.FolderCreate(name='Music'))
                 result = viewer.create_fragment(viewer.FragmentCreate(content='![](/assets/image.webp)'), 'notes', 'Music')
                 stored = active/'Music'/f'{result.fragment.id}.md'
@@ -435,6 +431,183 @@ class TestImageLinkRepair(unittest.TestCase):
                     viewer.repair_image_links('note', viewer.FragmentUpdate(content='stale'), 'notes', 'Music')
                 self.assertEqual(ctx.exception.status_code, 409)
 
+
+
+class TestMultipleThumbnails(unittest.TestCase):
+    def test_all_link_images_are_saved_and_recognized_for_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assets = root/'assets'
+            assets.mkdir()
+            paths = [assets/'a.jpg', assets/'b.jpg']
+            for path in paths:
+                path.write_bytes(b'image')
+            from unittest.mock import patch
+            with patch.multiple(viewer, ASSETS_DIR=assets), patch.object(viewer.capture, '_fetch_metadata', return_value={'title': 'Title', 'image_urls': ['https://example.com/a.jpg', 'https://example.com/b.jpg']}), patch.object(viewer.capture, '_download_thumbnail', side_effect=paths):
+                content, warnings = viewer._enrich_post('https://example.com')
+                self.assertFalse(warnings)
+                self.assertIn('![](/assets/a.jpg)', content)
+                self.assertIn('![](/assets/b.jpg)', content)
+                content = content.replace('/assets/', '../../assets/')
+                self.assertEqual(viewer._thumbnail_references(content, root/'active'/'inbox'/'note.md'), {path.resolve() for path in paths})
+
+
+class TestTagRename(unittest.TestCase):
+    def test_rename_only_selected_folder_and_its_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active, archive = root/'active', root/'archive'
+            for directory in [active/'Music', archive/'Music', active/'Other', active/'inbox']:
+                directory.mkdir(parents=True)
+                (directory/'note.md').write_text('#音楽 #音楽制作\nhttps://example.com/#音楽\ntitle: #音楽\n')
+            with patch.multiple(viewer, ACTIVE_DIR=active, INBOX_DIR=active/'inbox', ARCHIVE_DIR=archive):
+                result = viewer.rename_tag(viewer.TagRename(old='音楽', new='music'), 'notes', 'Music')
+                self.assertEqual(result.count, 2)
+                for directory in [active/'Music', archive/'Music']:
+                    self.assertEqual((directory/'note.md').read_text(), '#music #音楽制作\nhttps://example.com/#音楽\ntitle: #音楽\n')
+                self.assertTrue((active/'Other'/'note.md').read_text().startswith('#音楽 '))
+                with self.assertRaises(HTTPException):
+                    viewer.rename_tag(viewer.TagRename(old='music', new='bad tag'), 'notes', 'Music')
+                with self.assertRaises(HTTPException):
+                    viewer.rename_tag(viewer.TagRename(old='music', new='ok'), 'archive', '')
+
+    def test_inbox_and_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inbox, archived = root/'active'/'inbox', root/'archive'/'inbox'
+            for directory in [inbox, archived]:
+                directory.mkdir(parents=True)
+                (directory/'note.md').write_text('#old')
+            with patch.multiple(viewer, ACTIVE_DIR=root/'active', INBOX_DIR=inbox, ARCHIVE_DIR=root/'archive'):
+                original_write = viewer._atomic_write
+                calls = 0
+                def failing_write(path, data):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        raise OSError('failed')
+                    original_write(path, data)
+                with patch.object(viewer, '_atomic_write', side_effect=failing_write):
+                    with self.assertRaises(HTTPException):
+                        viewer.rename_tag(viewer.TagRename(old='old', new='new'))
+                for directory in [inbox, archived]:
+                    self.assertEqual((directory/'note.md').read_text(), '#old')
+                self.assertEqual(viewer.rename_tag(viewer.TagRename(old='old', new='new')).count, 2)
+
+
+class TestEditLinkEnrichment(unittest.TestCase):
+    def test_edit_fetches_new_link_images_and_preserves_existing_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            folder, assets = root/'active'/'Music', root/'assets'
+            folder.mkdir(parents=True)
+            assets.mkdir()
+            note = folder/'note.md'
+            original = 'https://example.com/old\ntitle: Old\n'
+            note.write_text(original)
+            images = [assets/'a.webp', assets/'b.webp']
+            for image in images:
+                image.write_bytes(b'image')
+            with patch.multiple(viewer, ROOT_DIR=root, ACTIVE_DIR=root/'active', ASSETS_DIR=assets), patch.object(viewer.capture, '_fetch_metadata', return_value={'title': 'New', 'image_urls': ['https://example.com/a', 'https://example.com/b']}) as fetch, patch.object(viewer.capture, '_download_thumbnail', side_effect=images):
+                result = viewer.update_fragment('note', viewer.FragmentUpdate(content=original+'\nhttps://example.com/new', enrich_links=True), 'notes', 'Music')
+            fetch.assert_called_once_with('https://example.com/new')
+            self.assertIn('title: Old', result.content)
+            self.assertIn('title: New', result.content)
+            self.assertIn('![](../../assets/a.webp)', note.read_text())
+            self.assertIn('![](../../assets/b.webp)', note.read_text())
+            self.assertEqual(result.warnings, [])
+
+    def test_edit_preserves_text_and_returns_warning_on_fetch_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root/'note.md').write_text('old')
+            with patch.object(viewer, 'INBOX_DIR', root), patch.object(viewer.capture, '_fetch_metadata', side_effect=OSError('offline')):
+                result = viewer.update_fragment('note', viewer.FragmentUpdate(content='https://example.com', enrich_links=True))
+            self.assertEqual(result.content, 'https://example.com')
+            self.assertTrue(result.warnings)
+
+
+class TestFolderManagement(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name).resolve()
+        self.active, self.archive, self.assets = [self.root/n for n in ('active', 'archive', 'assets')]
+        for path in (self.active/'Music', self.active/'inbox', self.archive/'Music', self.assets):
+            path.mkdir(parents=True)
+        self.patcher = patch.multiple(viewer, ROOT_DIR=self.root, ACTIVE_DIR=self.active,
+                                     INBOX_DIR=self.active/'inbox', ARCHIVE_DIR=self.archive, ASSETS_DIR=self.assets)
+        self.patcher.start()
+        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(self.patcher.stop)
+
+    def test_rename_preserves_articles_archive_and_order(self):
+        content = '![](../../assets/picture.webp)'
+        for root in (self.active, self.archive):
+            (root/'Music'/'note.md').write_text(content)
+        viewer.reorder_navigation(viewer.FolderOrder(names=['notes:Music', 'inbox:']))
+        viewer.rename_folder('Music', viewer.FolderCreate(name='音楽'))
+        for root in (self.active, self.archive):
+            self.assertFalse((root/'Music').exists())
+            self.assertEqual((root/'音楽'/'note.md').read_text(), content)
+        self.assertEqual([f.id for f in viewer.get_navigation()], ['notes:音楽', 'inbox:'])
+
+    def test_rename_rejects_inbox_collisions_and_rolls_back(self):
+        for name in ['inbox', '../outside']:
+            with self.assertRaises(HTTPException):
+                viewer.rename_folder(name, viewer.FolderCreate(name='New'))
+        (self.archive/'Other').mkdir()
+        with self.assertRaises(HTTPException) as ctx:
+            viewer.rename_folder('Music', viewer.FolderCreate(name='Other'))
+        self.assertEqual(ctx.exception.status_code, 409)
+        viewer.reorder_navigation(viewer.FolderOrder(names=['notes:Music', 'inbox:']))
+        with patch.object(viewer, '_atomic_write', side_effect=OSError('failed')):
+            with self.assertRaises(HTTPException):
+                viewer.rename_folder('Music', viewer.FolderCreate(name='New'))
+        self.assertTrue((self.active/'Music').exists())
+        self.assertTrue((self.archive/'Music').exists())
+        self.assertFalse((self.active/'New').exists())
+
+    def test_delete_folder_preserves_archive_and_shared_images(self):
+        for name in ['only.webp', 'shared.webp', 'unrelated.webp']:
+            (self.assets/name).write_bytes(b'image')
+        (self.active/'Music'/'a.md').write_text('![](../../assets/only.webp)\n![](../../assets/shared.webp)')
+        (self.archive/'Music'/'b.md').write_text('![](../../assets/shared.webp)')
+        preview = viewer.preview_folder_delete('Music')
+        self.assertEqual(preview.count, 1)
+        viewer.delete_folder('Music', viewer.FolderDeleteRequest(revision=preview.revision))
+        self.assertFalse((self.active/'Music').exists())
+        self.assertTrue((self.archive/'Music'/'b.md').exists())
+        self.assertFalse((self.assets/'only.webp').exists())
+        self.assertTrue((self.assets/'shared.webp').exists())
+        self.assertTrue((self.assets/'unrelated.webp').exists())
+        self.assertFalse((self.root/'Trash').exists())
+        self.assertEqual([f.id for f in viewer.get_navigation()], ['inbox:'])
+
+    def test_delete_checks_preview_and_rejects_unknown_contents(self):
+        preview = viewer.preview_folder_delete('Music')
+        note = self.active/'Music'/'a.md'
+        note.write_text('new')
+        with self.assertRaises(HTTPException) as ctx:
+            viewer.delete_folder('Music', viewer.FolderDeleteRequest(revision=preview.revision))
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(note.read_text(), 'new')
+        with self.assertRaises(HTTPException):
+            viewer.preview_folder_delete('inbox')
+        (self.active/'Music'/'nested').mkdir()
+        with self.assertRaises(HTTPException):
+            viewer.preview_folder_delete('Music')
+
+    def test_article_deletion_cleans_images_and_preserves_archive_reference(self):
+        (self.assets/'only.webp').write_bytes(b'image')
+        (self.assets/'shared.webp').write_bytes(b'image')
+        note = self.active/'Music'/'a.md'
+        note.write_text('![](../../assets/only.webp)\n![](../../assets/shared.webp)')
+        (self.archive/'Music'/'b.md').write_text('![](../../assets/shared.webp)')
+        result = viewer.delete_fragment('a', 'notes', 'Music')
+        self.assertEqual(result.status, 'deleted')
+        self.assertFalse(note.exists())
+        self.assertFalse((self.assets/'only.webp').exists())
+        self.assertTrue((self.assets/'shared.webp').exists())
 
 
 class TestMoveFragment(unittest.TestCase):

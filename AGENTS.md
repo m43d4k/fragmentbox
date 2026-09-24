@@ -12,7 +12,7 @@ fragmentbox — テキスト、画像、URLの断片をMarkdownでローカル�
 - 実ディレクトリを分類の正本とする。ビューアのフォルダ一覧・作成・並び替えは実装済み（SPEC.md第12章）。ビューア下部の投稿欄から選択フォルダへ投稿できる（SPEC.md第13章）。記事単位のアーカイブ・復帰は実装済み（SPEC.md第21章）。通常記事の検索付きフォルダ移動は第22章で実装済み。移動アイコンはArchiveの記事に表示せず、移動先にもArchiveを含めない。
 - アーカイブは所属フォルダと原文を保った移動とする。定期的なAI要約・再編集は運用の前提にしない。
 - `paths.active` 配下の1階層を通常フォルダとし、Inboxも通常フォルダと同列に並べ、統合表示順を `.navigation-order.json` に保存する。Archiveだけ別枠。画面にactiveという親項目は出さない。GUIは引き続きInboxへ投稿する。
-- Trashの方針はSPEC.md第19章を参照する。復元UIは作らず、元の場所・参照画像を記録して手動復元の余地を残す（未実装）。
+- フォルダ名の右クリックで名前変更・削除ができる（SPEC.md第24章）。Inboxは対象外。名前変更はArchive内の同名フォルダも変更し、削除ではArchiveを残す。Trashは廃止し、確認後に記事・フォルダを完全削除する。元の場所や削除履歴を記録しない。
 - 未決事項はSPEC.mdに記載する。文書更新を理由に、設定や既存データを自動で移行しない。
 
 ## Code Style
@@ -48,7 +48,7 @@ FRAGMENTBOX_LOG=DEBUG ./run_fragmentbox.sh
 
 画像: ラスター → pyvips で WebP 変換。SVG / GIF → そのままコピー（`_COPY_ONLY_EXTENSIONS`、pyvips の制限ではなくアプリの方針）。pyvips は `import_image()` 内で遅延 import。
 
-`_download_thumbnail`: `tempfile.mkstemp()` + `os.fdopen()` で書き込む。`Content-Type: image/*` 以外・10 MB 超はスキップ。`trafilatura` の `meta.image` は `urljoin(url, image_url)` で絶対 URL に解決する。
+`_download_thumbnail`: `tempfile.mkstemp()` + `os.fdopen()` で書き込む。10 MB 超はスキップ。通常は `Content-Type: image/*` のみ受け入れ、application/octet-streamはGIF識別情報と.gif拡張子を検証した場合だけ許可する。`trafilatura` の `meta.image` は `urljoin(url, image_url)` で絶対 URL に解決する。
 
 **viewer.py** — FastAPI ビューア・投稿API（デフォルト :8765）
 - 投稿と画像添付は `fragmentbox.py` の画像変換・URL情報取得処理を再利用する。保存中は投稿先を固定する。
@@ -56,9 +56,11 @@ FRAGMENTBOX_LOG=DEBUG ./run_fragmentbox.sh
 - 返り値は Pydantic `BaseModel`（`dict` 禁止）
 - `source` パラメータは `Source = Literal["notes", "inbox", "archive"]`
 - `Fragment.created_at` は `datetime` 型
-- 削除時は `IMAGE_PATTERN` で抽出した `../assets/` 参照画像も Trash へ移動
+- 削除対象の参照画像は、既存の参照チェックを使い、残る記事で使われていなければ完全削除する。`paths.trash` は不要。旧Trash内のデータを自動削除しない。
 
-**viewer.html** — Vanilla JS SPA。タグ（AND/OR）・テキスト・日付・お気に入りでクライアントサイドフィルタリング。ANDモードでは、現在の全フィルター条件にタグを追加して0件になる未選択タグを無効化する。記事フッターにお気に入り・編集・移動・アーカイブ・削除ボタン。Archive内では移動・アーカイブ・削除を表示せず、復帰ボタンを表示する。
+**viewer.html** — Vanilla JS SPA。タグ（AND/OR）・テキスト・日付・お気に入りでクライアントサイドフィルタリング。ANDモードでは、現在の全フィルター条件にタグを追加して0件になる未選択タグを無効化する。記事フッターにお気に入り・編集・3点メニュー。移動・アーカイブ・削除はメニュー内に表示する。Archive内では移動・アーカイブ・削除を表示せず、復帰ボタンを表示する。
+
+- リンク取得はSPEC.md第23・26章、タグ補完・検索・リネームは第25・30・31章、スクロールと操作メニューは第27〜29章を参照する。YouTube・Reddit投稿はoEmbedを使う。
 
 ## Fragment ファイル形式
 

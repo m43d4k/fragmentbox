@@ -105,36 +105,99 @@ def import_image(src: Path, assets_dir: Path | None = None) -> Path:
 
 # --- メタデータ取得 ---
 
-def _fetch_youtube(url: str) -> dict[str, str]:
-    import yt_dlp
-    opts = {"quiet": True, "no_warnings": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+def _fetch_youtube(url: str) -> dict[str, str | list[str]]:
+    import json
+    import urllib.request
+    from urllib.parse import urlencode
+
+    endpoint = "https://www.youtube.com/oembed?" + urlencode({"url": url, "format": "json"})
+    request = urllib.request.Request(
+        endpoint, headers={"User-Agent": "Mozilla/5.0 (compatible; fragmentbox)"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        data = response.read(_THUMBNAIL_MAX_BYTES + 1)
+    if len(data) > _THUMBNAIL_MAX_BYTES:
+        raise ValueError("YouTube metadata exceeded 10 MB")
+    info = json.loads(data)
+    title = info.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("YouTubeの動画タイトルを取得できませんでした")
     return {
-        "title": info.get("title") or "",
+        "title": " ".join(title.split()),
         "sitename": "YouTube",
-        "description": info.get("channel") or info.get("uploader") or "",
-        "image_url": info.get("thumbnail") or "",
+        "description": info.get("author_name") or "",
+        "image_url": info.get("thumbnail_url") or "",
     }
 
 
-def _fetch_general(url: str) -> dict[str, str]:
+def _link_title(document, fallback: str = "") -> str:
+    """リンク用メタ情報とページタイトルを本文の見出しより優先する。"""
+    for key in ("og:title", "twitter:title"):
+        for element in document.iter("meta"):
+            if (element.get("property", "").lower() == key
+                    or element.get("name", "").lower() == key):
+                title = " ".join(element.get("content", "").split())
+                if title:
+                    return title
+    for element in document.xpath("//head/title"):
+        title = " ".join(element.text_content().split())
+        if title:
+            return title
+    return fallback
+
+
+def _link_images(document, fallback: str = "") -> list[str]:
+    """OG画像を指定順に取得し、なければTwitter画像を使う。"""
+    for keys in (("og:image", "og:image:url"), ("twitter:image", "twitter:image:src")):
+        images = []
+        for element in document.iter("meta"):
+            if (element.get("property", "").lower() in keys
+                    or element.get("name", "").lower() in keys):
+                image = element.get("content", "").strip()
+                if image and image not in images:
+                    images.append(image)
+        if images:
+            return images
+    return [fallback] if fallback else []
+
+
+def _link_image(document, fallback: str = "") -> str:
+    images = _link_images(document, fallback)
+    return images[0] if images else ""
+
+
+def _metadata_image_urls(meta) -> list[str]:
+    return meta.get("image_urls") or ([meta["image_url"]] if meta.get("image_url") else [])
+
+
+def _fetch_general(url: str) -> dict[str, str | list[str]]:
     import trafilatura
+    import urllib.request
+    from trafilatura.utils import load_html
     from urllib.parse import urljoin
-    downloaded = trafilatura.fetch_url(url)
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (compatible; fragmentbox)"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        downloaded = response.read(_THUMBNAIL_MAX_BYTES + 1)
+    if len(downloaded) > _THUMBNAIL_MAX_BYTES:
+        raise ValueError("Metadata page exceeded 10 MB")
     if not downloaded:
         return {}
+    document = load_html(downloaded)
+    if document is None:
+        return {}
+    title = _link_title(document)
     meta = trafilatura.extract_metadata(downloaded)
     if not meta:
-        return {}
-    image_url = meta.image or ""
-    if image_url:
-        image_url = urljoin(url, image_url)  # 相対URLを絶対URLに解決
+        return {"title": title} if title else {}
+    image_urls = list(dict.fromkeys(urljoin(url, image) for image in _link_images(document, meta.image or "")))
     return {
-        "title": meta.title or "",
+        "title": title or meta.title or "",
         "sitename": meta.sitename or "",
         "description": meta.description or "",
-        "image_url": image_url,
+        "image_url": image_urls[0] if image_urls else "",
+        "image_urls": image_urls,
     }
 
 
@@ -161,7 +224,8 @@ def _download_thumbnail(image_url: str, assets_dir: Path | None = None) -> Path 
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             content_type = resp.headers.get("Content-Type", "")
-            if not content_type.startswith("image/"):
+            generic_binary = content_type.split(";", 1)[0].strip().lower() == "application/octet-stream"
+            if not content_type.startswith("image/") and not generic_binary:
                 logger.warning("Thumbnail skipped: Content-Type=%r for %s", content_type, image_url)
                 return None
             content_length = resp.headers.get("Content-Length")
@@ -176,6 +240,13 @@ def _download_thumbnail(image_url: str, assets_dir: Path | None = None) -> Path 
         if len(data) > _THUMBNAIL_MAX_BYTES:
             logger.warning("Thumbnail skipped: response exceeded %d bytes for %s", _THUMBNAIL_MAX_BYTES, image_url)
             return None
+        if generic_binary:
+            if data[:6] not in (b"GIF87a", b"GIF89a"):
+                logger.warning("Thumbnail skipped: binary response is not a GIF: %s", image_url)
+                return None
+            if tmp_path.suffix != ".gif":
+                logger.warning("Thumbnail skipped: GIF response has a non-GIF URL: %s", image_url)
+                return None
         import os
         with os.fdopen(fd, "wb") as f:
             f.write(data)
@@ -191,9 +262,46 @@ def _download_thumbnail(image_url: str, assets_dir: Path | None = None) -> Path 
         tmp_path.unlink(missing_ok=True)
 
 
-def _fetch_metadata(url: str) -> dict[str, str]:
+def _fetch_reddit(url: str) -> dict[str, str | list[str]]:
+    import json
+    import urllib.request
+    from urllib.parse import urlencode, urlsplit, urlunsplit
+
+    parsed = urlsplit(url)
+    canonical = urlunsplit(("https", "www.reddit.com", parsed.path, "", ""))
+    endpoint = "https://www.reddit.com/oembed?" + urlencode({"url": canonical})
+    request = urllib.request.Request(
+        endpoint, headers={"User-Agent": "Mozilla/5.0 (compatible; fragmentbox)"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        data = response.read(_THUMBNAIL_MAX_BYTES + 1)
+    if len(data) > _THUMBNAIL_MAX_BYTES:
+        raise ValueError("Reddit metadata exceeded 10 MB")
+    meta = json.loads(data)
+    title = meta.get("title")
+    if not isinstance(title, str) or not title.strip() or title.strip().lower() == "reddit":
+        raise ValueError("Redditの投稿タイトルを取得できませんでした")
+    title = " ".join(title.split())
+    subreddit = re.match(r"^/r/([^/]+)/comments/", parsed.path, re.IGNORECASE)
+    if subreddit:
+        title = f"r/{subreddit.group(1)} - {title}"
+    image = meta.get("thumbnail_url")
+    return {
+        "title": title,
+        "sitename": "Reddit",
+        "description": "",
+        "image_url": image if isinstance(image, str) else "",
+    }
+
+
+def _fetch_metadata(url: str) -> dict[str, str | list[str]]:
+    from urllib.parse import urlsplit
     if YOUTUBE_PATTERN.match(url):
         return _fetch_youtube(url)
+    parsed = urlsplit(url)
+    if (parsed.hostname in {"reddit.com", "www.reddit.com", "old.reddit.com", "new.reddit.com"}
+            and re.match(r"^/(?:r/[^/]+/)?comments/[a-z0-9]+(?:/|$)", parsed.path, re.IGNORECASE)):
+        return _fetch_reddit(url)
     return _fetch_general(url)
 
 
@@ -224,7 +332,7 @@ def _find_urls_without_metadata(content: str) -> list[tuple[str, int]]:
 
 
 def _insert_metadata(
-    text_widget: "DropTextEdit", url: str, occurrence: int, meta: dict[str, str]
+    text_widget: "DropTextEdit", url: str, occurrence: int, meta: dict[str, str | list[str]]
 ) -> None:
     lines = []
     if meta.get("title"):
@@ -233,8 +341,8 @@ def _insert_metadata(
         lines.append(f"sitename: {meta['sitename']}")
     if meta.get("description"):
         lines.append(f"description: {meta['description']}")
-    if meta.get("thumbnail"):
-        lines.append(f"![]({_image_reference(ASSETS_DIR / meta['thumbnail'])})")
+    for thumbnail in meta.get("thumbnails", []) or ([meta["thumbnail"]] if meta.get("thumbnail") else []):
+        lines.append(f"![]({_image_reference(ASSETS_DIR / thumbnail)})")
     if not lines:
         return
 
@@ -292,7 +400,7 @@ def _do_save(text_widget: "DropTextEdit", status_label: QLabel) -> None:
 def _apply_and_save(
     text_widget: "DropTextEdit",
     status_label: QLabel,
-    results: list[tuple[str, int, dict[str, str]]],
+    results: list[tuple[str, int, dict[str, str | list[str]]]],
 ) -> None:
     for url, occurrence, meta in results:
         _insert_metadata(text_widget, url, occurrence, meta)
@@ -302,14 +410,14 @@ def _apply_and_save(
 class MetadataWorker(QThread):
     """バックグラウンドで URL メタデータを取得し、Signal で結果を返す。"""
 
-    metadata_ready = Signal(list)  # list[tuple[str, int, dict[str, str]]]
+    metadata_ready = Signal(list)  # list[tuple[str, int, dict[str, str | list[str]]]]
 
     def __init__(self, urls_with_idx: list[tuple[str, int]], parent=None):
         super().__init__(parent)
         self._urls_with_idx = urls_with_idx
 
     def run(self):
-        results: list[tuple[str, int, dict[str, str]]] = []
+        results: list[tuple[str, int, dict[str, str | list[str]]]] = []
         for url, idx in self._urls_with_idx:
             try:
                 meta = _fetch_metadata(url)
@@ -317,11 +425,14 @@ class MetadataWorker(QThread):
                 logger.exception("Failed to fetch metadata for %s", url)
                 meta = {}
 
-            image_url = meta.pop("image_url", "")
-            if image_url:
+            thumbnails = []
+            for image_url in _metadata_image_urls(meta):
                 thumb = _download_thumbnail(image_url)
                 if thumb:
-                    meta["thumbnail"] = thumb.name
+                    thumbnails.append(thumb.name)
+            meta.pop("image_url", None)
+            meta.pop("image_urls", None)
+            meta["thumbnails"] = thumbnails
 
             results.append((url, idx, meta))
         self.metadata_ready.emit(results)
@@ -556,7 +667,7 @@ class FragmentBoxWindow(QWidget):
         else:
             _do_save(self.text_area, self.status_label)
 
-    def _on_metadata_done(self, results: list[tuple[str, int, dict[str, str]]]) -> None:
+    def _on_metadata_done(self, results: list[tuple[str, int, dict[str, str | list[str]]]]) -> None:
         try:
             _apply_and_save(self.text_area, self.status_label, results)
         finally:

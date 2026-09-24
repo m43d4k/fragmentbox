@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -28,7 +29,6 @@ ROOT_DIR    = Path(_config["paths"]["root"]).expanduser()
 ACTIVE_DIR  = Path(_config["paths"]["active"]).expanduser()
 INBOX_DIR   = Path(_config["paths"]["inbox"]).expanduser()
 ARCHIVE_DIR = Path(_config["paths"]["archive"]).expanduser()
-TRASH_DIR   = Path(_config["paths"]["trash"]).expanduser()
 ASSETS_DIR  = Path(_config["paths"]["assets"]).expanduser()
 PORT: int = _config.get("viewer", {}).get("port", 8765)
 
@@ -67,6 +67,7 @@ class DeleteResponse(BaseModel):
 class FragmentUpdate(BaseModel):
     content: str
     remove_unused_thumbnails: bool = False
+    enrich_links: bool = False
 
 
 app = FastAPI()
@@ -109,7 +110,7 @@ def _folder_dir(source: Source, folder: str) -> Path:
     _validate_name(folder)
     path = root / folder
     if source == "notes" and (folder == "notes" or path.resolve() in {
-            p.resolve() for p in (INBOX_DIR, ARCHIVE_DIR, TRASH_DIR, ASSETS_DIR)}):
+            p.resolve() for p in (INBOX_DIR, ARCHIVE_DIR, ASSETS_DIR)}):
         raise HTTPException(422, "Reserved directory")
     if path.is_symlink() or not path.is_dir():
         raise HTTPException(404, "Folder not found")
@@ -128,7 +129,7 @@ def _folder_names(source: Source) -> list[str]:
     root = _source_dir(source)
     if not root.exists():
         return []
-    reserved = {p.resolve() for p in (INBOX_DIR, ARCHIVE_DIR, TRASH_DIR, ASSETS_DIR)} if source == "notes" else set()
+    reserved = {p.resolve() for p in (INBOX_DIR, ARCHIVE_DIR, ASSETS_DIR)} if source == "notes" else set()
     return sorted(p.name for p in root.iterdir()
                   if p.is_dir() and not p.is_symlink() and not p.name.startswith(".")
                   and p.resolve() not in reserved and not (source == "notes" and p.name == "notes"))
@@ -155,7 +156,7 @@ def get_folders(source: Source = "notes") -> list[Folder]:
 def create_folder(body: FolderCreate) -> Folder:
     _validate_name(body.name)
     if body.name == "notes" or (ACTIVE_DIR / body.name).resolve() in {
-            p.resolve() for p in (INBOX_DIR, ARCHIVE_DIR, TRASH_DIR, ASSETS_DIR)}:
+            p.resolve() for p in (INBOX_DIR, ARCHIVE_DIR, ASSETS_DIR)}:
         raise HTTPException(422, "Reserved directory")
     with _folder_lock:
         try:
@@ -410,8 +411,8 @@ def _enrich_post(content: str) -> tuple[str, list[str]]:
                 warnings.append(f"URL情報を取得できませんでした: {url}")
                 continue
             details = [f"{key}: {meta[key]}" for key in ("title", "sitename", "description") if meta.get(key)]
-            if meta.get("image_url"):
-                thumb = capture._download_thumbnail(meta["image_url"], ASSETS_DIR)
+            for image_url in capture._metadata_image_urls(meta):
+                thumb = capture._download_thumbnail(image_url, ASSETS_DIR)
                 if thumb:
                     details.append(f"![](/assets/{thumb.name})")
                 else:
@@ -427,13 +428,7 @@ def _enrich_post(content: str) -> tuple[str, list[str]]:
     return "".join(lines), warnings
 
 
-@app.post("/api/fragments", status_code=201)
-def create_fragment(body: FragmentCreate, source: Source = "notes", folder: str = "") -> PostResponse:
-    directory = _posting_dir(source, folder)
-    content = body.content.strip()
-    if not content:
-        raise HTTPException(422, "本文を入力してください")
-    content, warnings = _enrich_post(content)
+def _relative_image_references(content: str, directory: Path) -> str:
     # 添付時の共通URLを、選択された投稿先から解決可能な相対パスへ変換する。
     def image_reference(match: re.Match) -> str:
         name = match.group(2)
@@ -442,22 +437,35 @@ def create_fragment(body: FragmentCreate, source: Source = "notes", folder: str 
             raise HTTPException(422, "添付画像が見つかりません")
         relative = Path(os.path.relpath(asset, directory)).as_posix()
         return f"![{match.group(1)}]({relative})"
-    content = re.sub(r"!\[([^\]]*)\]\(/assets/([^/()]+)\)", image_reference, content)
+    return re.sub(r"!\[([^\]]*)\]\(/assets/([^/()]+)\)", image_reference, content)
+
+
+@app.post("/api/fragments", status_code=201)
+def create_fragment(body: FragmentCreate, source: Source = "notes", folder: str = "") -> PostResponse:
+    directory = _posting_dir(source, folder)
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(422, "本文を入力してください")
+    content, warnings = _enrich_post(content)
+    content = _relative_image_references(content, directory)
     # 最後の画像行もMarkdown強制改行を保持する。
     if re.search(r"!\[[^\]]*\]\([^)]*\)$", content):
         content += "  \n"
     filename = datetime.now().strftime("%Y%m%d_%H%M%S_%f.md")
     path = directory / filename
-    try:
-        if not folder:
-            directory.mkdir(parents=True, exist_ok=True)
-        with path.open("x", encoding="utf-8") as f:
-            f.write(content)
-    except FileExistsError as exc:
-        raise HTTPException(409, "保存名が重複しました。再度保存してください") from exc
-    except OSError as exc:
-        raise HTTPException(500, "投稿を保存できませんでした") from exc
-    return PostResponse(fragment=parse_fragment(path), warnings=warnings)
+    with _folder_lock:
+        try:
+            directory = _posting_dir(source, folder)
+            path = directory / filename
+            if not folder:
+                directory.mkdir(parents=True, exist_ok=True)
+            with path.open("x", encoding="utf-8") as f:
+                f.write(content)
+        except FileExistsError as exc:
+            raise HTTPException(409, "保存名が重複しました。再度保存してください") from exc
+        except OSError as exc:
+            raise HTTPException(500, "投稿を保存できませんでした") from exc
+        return PostResponse(fragment=parse_fragment(path), warnings=warnings)
 
 
 @app.get("/api/fragments")
@@ -485,16 +493,17 @@ def get_tags(source: Source = "inbox", folder: str = "") -> list[str]:
 
 @app.patch("/api/fragments/{fragment_id}/favorite")
 def toggle_favorite(fragment_id: str, source: Source = "inbox", folder: str = "") -> FavoriteResponse:
-    path = _fragment_path(source, folder, fragment_id)
-    content = path.read_text(encoding="utf-8").rstrip()
-    if "#favorite" in content:
-        content = re.sub(r"[ \t]*#favorite\b", "", content).rstrip()
-        favorited = False
-    else:
-        content = content + " #favorite"
-        favorited = True
-    path.write_text(content + "\n", encoding="utf-8")
-    return FavoriteResponse(status="ok", favorited=favorited, tags=TAG_PATTERN.findall(content))
+    with _folder_lock:
+        path = _fragment_path(source, folder, fragment_id)
+        content = path.read_text(encoding="utf-8").rstrip()
+        if "#favorite" in content:
+            content = re.sub(r"[ \t]*#favorite\b", "", content).rstrip()
+            favorited = False
+        else:
+            content = content + " #favorite"
+            favorited = True
+        path.write_text(content + "\n", encoding="utf-8")
+        return FavoriteResponse(status="ok", favorited=favorited, tags=TAG_PATTERN.findall(content))
 
 
 def _asset_references(content: str, note: Path) -> set[Path]:
@@ -524,14 +533,17 @@ def _thumbnail_references(content: str, note: Path) -> set[Path]:
         while j < len(lines) and re.match(r"^(title|sitename|description):", lines[j]):
             has_title |= bool(re.match(r"^title:\s*\S", lines[j]))
             j += 1
-        if has_title and j < len(lines):
+        while has_title and j < len(lines) and re.fullmatch(r"!\[[^\]]*\]\([^)]+\)", lines[j].strip()):
             result.update(_asset_references(lines[j], note))
+            j += 1
     return result
 
 
-def _unreferenced_thumbnails(candidates: set[Path], edited: Path, content: str) -> set[Path]:
-    remaining = candidates - _asset_references(content, edited)
-    roots = {ROOT_DIR, INBOX_DIR, ARCHIVE_DIR, TRASH_DIR}
+def _unreferenced_assets(candidates: set[Path], excluded: set[Path]) -> set[Path]:
+    remaining = set(candidates)
+    if not remaining:
+        return set()
+    roots = {ROOT_DIR, ACTIVE_DIR, INBOX_DIR, ARCHIVE_DIR}
     seen = set()
     for root in roots:
         if not root.exists():
@@ -547,7 +559,7 @@ def _unreferenced_thumbnails(candidates: set[Path], edited: Path, content: str) 
                 if path.suffix != ".md" or path.is_symlink():
                     continue
                 resolved = path.resolve()
-                if resolved in seen or resolved == edited.resolve():
+                if resolved in seen or resolved in excluded:
                     continue
                 seen.add(resolved)
                 remaining -= _asset_references(path.read_text(encoding="utf-8"), path)
@@ -556,34 +568,119 @@ def _unreferenced_thumbnails(candidates: set[Path], edited: Path, content: str) 
     return remaining
 
 
-@app.put("/api/fragments/{fragment_id}")
-def update_fragment(fragment_id: str, body: FragmentUpdate, source: Source = "inbox", folder: str = "") -> Fragment:
-    path = _fragment_path(source, folder, fragment_id)
+def _unreferenced_thumbnails(candidates: set[Path], edited: Path, content: str) -> set[Path]:
+    return _unreferenced_assets(candidates - _asset_references(content, edited), {edited.resolve()})
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".fragmentbox-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+class TagRename(BaseModel):
+    old: str
+    new: str
+
+
+class TagRenameResponse(BaseModel):
+    old: str
+    new: str
+    count: int
+
+
+def _rename_tag_text(content: str, old: str, new: str) -> str:
+    result = []
+    for line in content.splitlines(keepends=True):
+        if line.lstrip().startswith(("title:", "sitename:", "description:", "![")):
+            result.append(line)
+            continue
+        # URLのフラグメント識別子はタグとして書き換えない。
+        parts = re.split(r"(https?://\S+)", line)
+        for index in range(0, len(parts), 2):
+            parts[index] = TAG_PATTERN.sub(lambda match: '#' + new if match[1] == old else match[0], parts[index])
+        result.append(''.join(parts))
+    return ''.join(result)
+
+
+@app.post("/api/tags/rename")
+def rename_tag(body: TagRename, source: Source = "inbox", folder: str = "") -> TagRenameResponse:
+    if any(not re.fullmatch(r"\w+", tag) for tag in (body.old, body.new)):
+        raise HTTPException(422, "タグ名は文字・数字・アンダースコアで入力してください（#は不要です）")
+    if source == 'inbox':
+        if folder:
+            raise HTTPException(422, "フォルダの指定が不正です")
+        name = INBOX_DIR.name
+    else:
+        if not folder:
+            raise HTTPException(422, "フォルダを選択してください")
+        _folder_dir(source, folder)
+        name = folder
+    _validate_name(name)
     with _folder_lock:
+        directories = [INBOX_DIR if name == INBOX_DIR.name else ACTIVE_DIR / name, ARCHIVE_DIR / name]
+        changes = []
+        try:
+            for directory in directories:
+                if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+                    raise HTTPException(422, "対象フォルダを読み込めません")
+                if not directory.exists():
+                    continue
+                for path in sorted(directory.glob('*.md')):
+                    if path.is_symlink():
+                        raise HTTPException(422, "対象記事にシンボリックリンクがあります")
+                    original = path.read_bytes()
+                    updated = _rename_tag_text(original.decode('utf-8'), body.old, body.new).encode('utf-8')
+                    if original != updated:
+                        stat = path.stat()
+                        changes.append((path, original, updated, (stat.st_atime_ns, stat.st_mtime_ns)))
+            written = []
+            try:
+                for path, original, updated, times in changes:
+                    _atomic_write(path, updated)
+                    written.append((path, original, times))
+                    os.utime(path, ns=times)
+            except OSError:
+                for path, original, times in reversed(written):
+                    _atomic_write(path, original)
+                    os.utime(path, ns=times)
+                raise
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(500, "タグ名を変更できませんでした") from exc
+    return TagRenameResponse(old=body.old, new=body.new, count=len(changes))
+
+
+class FragmentEditResponse(Fragment):
+    warnings: list[str] = Field(default_factory=list)
+
+
+@app.put("/api/fragments/{fragment_id}")
+def update_fragment(fragment_id: str, body: FragmentUpdate, source: Source = "inbox", folder: str = "") -> FragmentEditResponse:
+    with _folder_lock:
+        path = _fragment_path(source, folder, fragment_id)
         original = path.read_text(encoding="utf-8")
-        moved = []
+    content, warnings = _enrich_post(body.content) if body.enrich_links else (body.content, [])
+    if body.enrich_links:
+        content = _relative_image_references(content, path.parent)
+    with _folder_lock:
+        path = _fragment_path(source, folder, fragment_id)
+        if path.read_text(encoding="utf-8") != original:
+            raise HTTPException(409, "記事が変更されました。再読み込みして確認してください")
         try:
             removed = set()
             if body.remove_unused_thumbnails:
-                candidates = _thumbnail_references(original, path) - _thumbnail_references(body.content, path)
-                if candidates:
-                    removed = _unreferenced_thumbnails(candidates, path, body.content)
-            if removed:
-                TRASH_DIR.mkdir(parents=True, exist_ok=True)
-                destination = Path(tempfile.mkdtemp(prefix="thumbnails_", dir=TRASH_DIR))
-                for image in removed:
-                    if image.is_file():
-                        target = destination / image.name
-                        shutil.move(str(image), str(target))
-                        moved.append((target, image))
-            path.write_text(body.content, encoding="utf-8")
+                candidates = _thumbnail_references(original, path) - _thumbnail_references(content, path)
+                removed = _unreferenced_thumbnails(candidates, path, content)
+            _atomic_write(path, content.encode("utf-8"))
+            for image in removed:
+                image.unlink(missing_ok=True)
         except (OSError, UnicodeError) as exc:
-            for target, image in reversed(moved):
-                shutil.move(str(target), str(image))
-            if path.read_text(encoding="utf-8") != original:
-                path.write_text(original, encoding="utf-8")
-            raise HTTPException(500, "記事とサムネイルを更新できませんでした") from exc
-    return parse_fragment(path)
+            raise HTTPException(500, "記事または画像の更新に失敗しました。再読み込みして状態を確認してください") from exc
+        return FragmentEditResponse(**parse_fragment(path).model_dump(), warnings=warnings)
 
 
 class ArchiveResponse(BaseModel):
@@ -665,7 +762,7 @@ def restore_fragment(fragment_id: str, source: Source = "archive", folder: str =
         directory = INBOX_DIR if folder == INBOX_DIR.name else ACTIVE_DIR / folder
         if directory.is_symlink() or (folder != INBOX_DIR.name and (
                 folder == "notes" or directory.resolve() in {
-                    p.resolve() for p in (ARCHIVE_DIR, TRASH_DIR, ASSETS_DIR)})):
+                    p.resolve() for p in (ARCHIVE_DIR, ASSETS_DIR)})):
             raise HTTPException(422, "このフォルダには戻せません")
         destination = directory / path.name
         created = False
@@ -686,21 +783,125 @@ def restore_fragment(fragment_id: str, source: Source = "archive", folder: str =
     return ArchiveResponse(status="restored", id=fragment_id, folder=folder)
 
 
+def _delete_articles(paths: list[Path]) -> None:
+    candidates = set()
+    for path in paths:
+        candidates.update(_asset_references(path.read_text(encoding="utf-8"), path))
+    images = _unreferenced_assets(candidates, {path.resolve() for path in paths})
+    for path in paths:
+        path.unlink()
+    for image in images:
+        image.unlink(missing_ok=True)
+
+
 @app.delete("/api/fragments/{fragment_id}")
 def delete_fragment(fragment_id: str, source: Source = "inbox", folder: str = "") -> DeleteResponse:
     if source == "archive":
         raise HTTPException(422, "Cannot delete archived fragments")
-    path = _fragment_path(source, folder, fragment_id)
-    if (TRASH_DIR / path.name).exists():
-        raise HTTPException(409, "A fragment with this name already exists in Trash")
-    TRASH_DIR.mkdir(parents=True, exist_ok=True)
-    content = path.read_text(encoding="utf-8")
-    shutil.move(str(path), str(TRASH_DIR / path.name))
-    for filename in IMAGE_PATTERN.findall(content):
-        img_path = ASSETS_DIR / filename
-        if img_path.exists():
-            shutil.move(str(img_path), str(TRASH_DIR / filename))
-    return DeleteResponse(status="moved", id=fragment_id)
+    with _folder_lock:
+        path = _fragment_path(source, folder, fragment_id)
+        try:
+            _delete_articles([path])
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(500, "削除処理に失敗しました。一部削除済みの可能性があります。再読み込みしてください") from exc
+    return DeleteResponse(status="deleted", id=fragment_id)
+
+
+class FolderDeletePreview(BaseModel):
+    name: str
+    count: int
+    revision: str
+
+
+class FolderDeleteRequest(BaseModel):
+    revision: str
+
+
+def _folder_contents(name: str) -> tuple[Path, list[Path], str]:
+    if not name:
+        raise HTTPException(422, "フォルダを選択してください")
+    directory = _folder_dir("notes", name)
+    paths = sorted(directory.iterdir())
+    if any(p.is_symlink() or not p.is_file() or p.suffix != ".md" for p in paths):
+        raise HTTPException(422, "記事以外のファイルやサブフォルダがあります。内容を確認してください")
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.name.encode() + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return directory, paths, digest.hexdigest()
+
+
+@app.get("/api/folders/{name}/delete-preview")
+def preview_folder_delete(name: str) -> FolderDeletePreview:
+    with _folder_lock:
+        _, paths, revision = _folder_contents(name)
+    return FolderDeletePreview(name=name, count=len(paths), revision=revision)
+
+
+@app.delete("/api/folders/{name}")
+def delete_folder(name: str, body: FolderDeleteRequest) -> FolderDeletePreview:
+    with _folder_lock:
+        directory, paths, revision = _folder_contents(name)
+        if revision != body.revision:
+            raise HTTPException(409, "フォルダの内容が変わりました。削除を確認し直してください")
+        order = [f.id for f in get_navigation() if f.id != f"notes:{name}"]
+        try:
+            _delete_articles(paths)
+            directory.rmdir()
+            _atomic_write(ACTIVE_DIR / ".navigation-order.json", json.dumps(order, ensure_ascii=False).encode())
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(500, "フォルダの削除処理に失敗しました。一部削除済みの可能性があります。再読み込みしてください") from exc
+    return FolderDeletePreview(name=name, count=len(paths), revision=revision)
+
+
+@app.patch("/api/folders/{name}")
+def rename_folder(name: str, body: FolderCreate) -> Folder:
+    with _folder_lock:
+        if not name:
+            raise HTTPException(422, "フォルダを選択してください")
+        original = _folder_dir("notes", name)
+        _validate_name(body.name)
+        target = ACTIVE_DIR / body.name
+        if body.name == "notes" or target.resolve() in {p.resolve() for p in (INBOX_DIR, ARCHIVE_DIR, ASSETS_DIR)}:
+            raise HTTPException(422, "予約されたフォルダ名です")
+        if name == body.name:
+            return Folder(name=name)
+        archived, archived_target = ARCHIVE_DIR / name, ARCHIVE_DIR / body.name
+        if target.exists() or target.is_symlink() or archived_target.exists() or archived_target.is_symlink():
+            raise HTTPException(409, "同名のフォルダがあります。統合せず名前変更を中止しました")
+        if archived.is_symlink() or (archived.exists() and not archived.is_dir()):
+            raise HTTPException(422, "Archive内の同名項目を変更できません")
+        updates = {}
+        for root, filename in [(ACTIVE_DIR, '.navigation-order.json'), (ACTIVE_DIR, '.folder-order.json'), (ARCHIVE_DIR, '.folder-order.json')]:
+            path = root / filename
+            if not path.exists():
+                continue
+            raw = path.read_bytes()
+            try:
+                values = json.loads(raw)
+                if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+                    raise ValueError()
+            except ValueError as exc:
+                raise HTTPException(500, "フォルダの表示順を読み込めません") from exc
+            old, new = (f'notes:{name}', f'notes:{body.name}') if filename == '.navigation-order.json' else (name, body.name)
+            updates[path] = (raw, json.dumps([new if v == old else v for v in values], ensure_ascii=False).encode())
+        moved, written = [], []
+        try:
+            original.rename(target)
+            moved.append((target, original))
+            if archived.exists():
+                archived.rename(archived_target)
+                moved.append((archived_target, archived))
+            for path, (old, new) in updates.items():
+                _atomic_write(path, new)
+                written.append((path, old))
+        except OSError as exc:
+            for path, old in reversed(written):
+                _atomic_write(path, old)
+            for destination, source_path in reversed(moved):
+                destination.rename(source_path)
+            raise HTTPException(500, "フォルダ名を変更できませんでした") from exc
+    return Folder(name=body.name)
 
 
 @app.get("/")

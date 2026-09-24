@@ -131,17 +131,20 @@ header h1 {
 #fragments {
   width: 100%;
   margin: 0;
-  padding: 14px 16px;
+  padding: 14px 0;
 }
 
 #count {
   font-size: 12px;
   color: #555;
+  margin-left: 16px;
+  margin-right: 16px;
   margin-bottom: 10px;
 }
 
 .card {
-  padding: 24px 24px 16px;
+  position: relative;
+  padding: 24px 24px 16px 40px;
   transition: background-color 0.15s;
 }
 
@@ -149,8 +152,15 @@ header h1 {
   background-color: #282828;
 }
 
-.card + .card {
-  border-top: 1px solid #383838;
+.card + .card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 24px;
+  right: 24px;
+  height: 1px;
+  background: #383838;
+  pointer-events: none;
 }
 
 /* カード本文 */
@@ -172,6 +182,13 @@ a.url {
 a.url:hover { text-decoration: underline; }
 
 /* URLブロック（リンクプレビューカード） */
+.url-source {
+  max-width: 520px;
+  margin-top: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .url-block {
   max-width: 520px;
   margin: 6px 0 0;
@@ -232,6 +249,7 @@ a.url-title:hover { color: #5b9bd5; }
 }
 
 .card-datetime {
+  margin-bottom: 10px;
   font-size: 12px;
   color: #555;
 }
@@ -282,7 +300,7 @@ a.url-title:hover { color: #5b9bd5; }
 .fav-btn.active:hover { border-color: #e05555; }
 
 /* 編集ボタン */
-.edit-btn, .archive-btn, .restore-btn, .move-btn {
+.edit-btn, .archive-btn, .restore-btn, .move-btn, .article-menu-btn {
   background: transparent;
   color: #555;
   border: 1px solid #444;
@@ -294,7 +312,7 @@ a.url-title:hover { color: #5b9bd5; }
   display: flex;
   align-items: center;
 }
-.edit-btn:hover, .archive-btn:hover, .restore-btn:hover, .move-btn:hover { color: #7ab8e8; border-color: #7ab8e8; }
+.edit-btn:hover, .archive-btn:hover, .restore-btn:hover, .move-btn:hover, .article-menu-btn:hover { color: #7ab8e8; border-color: #7ab8e8; }
 
 /* 削除ボタン */
 .delete-btn {
@@ -510,7 +528,7 @@ main { margin-left: 180px; min-width: 0; }
 
 /* 下部投稿欄 */
 main { height: 100dvh; display: flex; flex-direction: column; }
-#viewer-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+#viewer-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; }
 #composer {
     flex: none;
     max-height: 45dvh;
@@ -546,6 +564,7 @@ main { height: 100dvh; display: flex; flex-direction: column; }
 
 
 .date-separator {
+    margin: 0 24px;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -628,3 +647,135 @@ main { height: 100dvh; display: flex; flex-direction: column; }
 }
 .move-picker [role=option]:hover, .move-picker [aria-selected=true] { background: #383838; color: #fff; }
 .move-error { color: #e89999; white-space: normal; }
+
+.link-thumbnails.multiple {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+}
+.link-thumbnail { min-width: 0; }
+.link-thumbnails.multiple .line-image { margin: 0; }
+.link-thumbnails.multiple .fragment-image {
+    display: block;
+    width: 100%;
+    height: 240px;
+    max-width: none;
+    max-height: none;
+    object-fit: cover;
+}
+
+.folder-menu {
+    position: fixed;
+    z-index: 100;
+    background: #202020;
+    border: 1px solid #444;
+    padding: 4px;
+}
+.folder-menu button {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    background: transparent;
+    border: 0;
+    color: #ddd;
+    text-align: left;
+    cursor: pointer;
+}
+.folder-menu button:hover, .folder-menu button:focus-visible { background: #383838; }
+
+.edit-tag-suggestions {
+    max-height: 160px;
+    overflow-y: auto;
+    margin: 4px 0 8px;
+    padding: 4px;
+    background: #202020;
+    border: 1px solid #444;
+}
+.edit-tag-suggestions button {
+    display: block;
+    width: 100%;
+    padding: 5px 8px;
+    border: 0;
+    background: transparent;
+    color: #ccc;
+    text-align: left;
+    cursor: pointer;
+}
+.edit-tag-suggestions button:hover,
+.edit-tag-suggestions [aria-selected=true] { background: #383838; color: #fff; }
+
+#composer .edit-tag-suggestions button {
+    display: block;
+    width: 100%;
+    padding: 5px 8px;
+    text-align: left;
+}
+#composer .edit-tag-suggestions button:hover,
+#composer .edit-tag-suggestions [aria-selected=true] { background: #383838; color: #fff; }
+
+#tag-filters.is-floating {
+    position: fixed;
+    z-index: 99;
+    max-height: 40vh;
+    overflow-y: auto;
+}
+
+.article-actions { position: relative; }
+.article-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 6px);
+    z-index: 20;
+    min-width: 180px;
+    padding: 4px;
+    background: #202020;
+    border: 1px solid #444;
+    border-radius: 6px;
+}
+.article-menu[hidden] { display: none; }
+.article-menu.below { bottom: auto; top: calc(100% + 6px); }
+.article-menu button {
+    display: block;
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+    padding: 8px 10px;
+    color: #ccc;
+    text-align: left;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+.article-menu button:hover, .article-menu button:focus-visible { background: #383838; color: #fff; }
+
+.tag-rename-panel {
+    position: fixed;
+    z-index: 200;
+    width: 300px;
+    max-width: calc(100vw - 16px);
+    padding: 12px;
+    background: #202020;
+    border: 1px solid #555;
+    border-radius: 6px;
+    color: #ddd;
+    display: grid;
+    gap: 8px;
+}
+.tag-rename-scope { font-size: 12px; color: #aaa; }
+.tag-rename-panel input, .tag-rename-panel button {
+    padding: 6px 8px;
+    color: #ddd;
+    background: #282828;
+    border: 1px solid #555;
+}
+.tag-rename-panel [role=alert] { color: #e89999; }
+
+#tag-search {
+    width: 160px;
+    max-width: 100%;
+    padding: 4px 8px;
+    color: #ddd;
+    background: #202020;
+    border: 1px solid #555;
+    border-radius: 6px;
+}
+#tag-filters .tag-btn[hidden] { display: none; }

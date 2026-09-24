@@ -3,7 +3,6 @@ root    = "~/idea_pool/fragmentbox"
 active  = "~/idea_pool/fragmentbox/active"
 inbox   = "~/idea_pool/fragmentbox/active/inbox"
 archive = "~/idea_pool/fragmentbox/archive"
-trash   = "~/idea_pool/fragmentbox/Trash"
 assets  = "~/idea_pool/fragmentbox/assets"
 
 [viewer]
