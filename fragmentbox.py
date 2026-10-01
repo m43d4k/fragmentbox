@@ -1,4 +1,5 @@
 import logging
+import html
 import os
 import re
 import shutil
@@ -7,6 +8,8 @@ import tomllib
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+from markdown_it import MarkdownIt
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -35,6 +38,35 @@ IMAGE_QUALITY = _config.get("images", {}).get("quality", 80)
 
 IMAGE_EXTENSIONS      = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".tiff", ".tif"}
 _COPY_ONLY_EXTENSIONS = {".svg", ".gif"}  # このアプリでは無変換コピーする形式
+ATTACHMENT_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".json", ".mp3", ".wav",
+                         ".aiff", ".aif", ".flac", ".m4a", ".ogg", ".mid", ".midi"}
+ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
+
+
+def attachment_markdown(name: str, reference: str) -> str:
+    if any(ord(char) < 32 or ord(char) == 127 for char in name):
+        raise ValueError("ファイル名に制御文字は使えません")
+    label = html.escape(name, quote=False).replace("[", "&#91;").replace("]", "&#93;")
+    return f"[{label}]({reference})  \n"
+
+
+def import_attachment(src: Path) -> Path:
+    if src.suffix.lower() not in ATTACHMENT_EXTENSIONS or src.is_symlink() or not src.is_file():
+        raise ValueError("対応していないファイルです")
+    if not 0 < src.stat().st_size <= ATTACHMENT_MAX_BYTES:
+        raise ValueError("添付ファイルは空でない100 MiB以下のファイルにしてください")
+    attachment_markdown(src.name, "")  # コピー前にファイル名を検証する。
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = ASSETS_DIR / f"attachment_{uuid.uuid4().hex}{src.suffix.lower()}"
+    try:
+        with src.open("rb") as source, dest.open("xb") as target:
+            shutil.copyfileobj(source, target)
+        if dest.stat().st_size > ATTACHMENT_MAX_BYTES:
+            raise ValueError("添付ファイルは100 MiB以下にしてください")
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+    return dest
 
 URL_PATTERN     = re.compile(r'https?://\S+')
 YOUTUBE_PATTERN = re.compile(r'https?://(www\.)?(youtube\.com|youtu\.be)/\S+')
@@ -42,17 +74,70 @@ TAG_PATTERN     = re.compile(r'#(\w+)')
 TAG_AT_END_PATTERN = re.compile(r'#\w+([ \t]*)$')
 
 
+TAG_LINE_PATTERN = re.compile(r"[ \t]*#\w+(?:[ \t]+#\w+)*[ \t]*")
+_TAG_MARKDOWN = MarkdownIt("commonmark")
+
+
+def _collect_tag_line(state, silent: bool) -> bool:
+    # Observe only text reached by the Markdown parser, outside code and links.
+    if not silent and not state.linkLevel and state.env.get("tag_source") == state.src:
+        start = state.src.rfind("\n", 0, state.pos) + 1
+        end = state.src.find("\n", state.pos)
+        if end < 0:
+            end = len(state.src)
+        if (not state.src[start:state.pos].strip()
+                and TAG_LINE_PATTERN.fullmatch(state.src[start:end])):
+            state.env["tag_lines"].add(state.src.count("\n", 0, start))
+    return False
+
+
+_TAG_MARKDOWN.inline.ruler.before("text", "collect_tag_line", _collect_tag_line)
+
+
+def tag_line_numbers(content: str) -> list[int]:
+    """Top-level paragraph lines containing tags only (zero-based)."""
+    text = content.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    frontmatter_end = 0
+    if lines and lines[0].lstrip("\ufeff") in ("---", "+++"):
+        delimiter = lines[0].lstrip("\ufeff")
+        frontmatter_end = next((i + 1 for i in range(1, len(lines))
+                                if lines[i] == delimiter), len(lines))
+    # Mask metadata without changing line numbers or Markdown block boundaries.
+    masked = "\n".join([""] * frontmatter_end + lines[frontmatter_end:])
+    env = {}
+    tokens = _TAG_MARKDOWN.parse(masked, env)
+    result = []
+    for index, token in enumerate(tokens):
+        if token.type != "paragraph_open" or token.level != 0:
+            continue
+        inline = tokens[index + 1]
+        local = dict(env, tag_source=inline.content, tag_lines=set())
+        _TAG_MARKDOWN.inline.parse(inline.content, _TAG_MARKDOWN, local, [])
+        for offset in sorted(local["tag_lines"]):
+            number = inline.map[0] + offset
+            if TAG_LINE_PATTERN.fullmatch(lines[number]):
+                result.append(number)
+    return result
+
+
+def extract_tags(content: str) -> list[str]:
+    lines = content.splitlines()
+    return list(dict.fromkeys(tag for number in tag_line_numbers(content)
+                              for tag in TAG_PATTERN.findall(lines[number])))
+
+
 def load_tags() -> list[str]:
     return _config.get("tags", {}).get("presets", [])
 
 
 def _has_tag(content: str, tag: str) -> bool:
-    return tag in TAG_PATTERN.findall(content)
+    return tag in extract_tags(content)
 
 
 def _tag_separator(content: str) -> str:
     match = TAG_AT_END_PATTERN.search(content)
-    if match is None:
+    if match is None or len(content.split("\n")) - 1 not in tag_line_numbers(content):
         return "\n\n"
     return "" if match.group(1) else " "
 
@@ -314,6 +399,8 @@ def _find_urls_without_metadata(content: str) -> list[tuple[str, int]]:
     results: list[tuple[str, int]] = []
     lines = content.splitlines()
     for i, line in enumerate(lines):
+        if re.fullmatch(r"\[[^\]]*\]\([^)]*attachment_[a-f0-9]{32}\.[a-z0-9]+\)\s*", line):
+            continue
         for m in URL_PATTERN.finditer(line):
             url = m.group(0).rstrip(".,;:!?()'\">")
             # URL 行の直後の連続行（空行が来るまで）に title: があるか確認
@@ -391,7 +478,7 @@ def _set_status(label: QLabel, text: str, color: str) -> None:
 
 
 def _do_save(text_widget: "DropTextEdit", status_label: QLabel) -> None:
-    content = text_widget.toPlainText().strip()
+    content = text_widget.toPlainText().rstrip()
     filepath = save_fragment(content)
     _set_status(status_label, f"Saved: {filepath.name}", "#27ae60")
     text_widget.clear()
@@ -441,14 +528,18 @@ class MetadataWorker(QThread):
 def _handle_image_path(
     text_widget: "DropTextEdit", status_label: QLabel, path: Path
 ) -> None:
-    if path.suffix.lower() not in IMAGE_EXTENSIONS:
+    if path.suffix.lower() not in IMAGE_EXTENSIONS | ATTACHMENT_EXTENSIONS:
         return
     try:
-        dest = import_image(path)
+        is_image = path.suffix.lower() in IMAGE_EXTENSIONS
+        dest = import_image(path) if is_image else import_attachment(path)
         cursor = text_widget.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(f"![]({_image_reference(dest)})  \n")
-        _set_status(status_label, f"Image: {dest.name}", "#27ae60")
+        if not is_image and text_widget.toPlainText() and not text_widget.toPlainText().endswith("\n"):
+            cursor.insertText("  \n")
+        cursor.insertText(f"![]({_image_reference(dest)})  \n" if is_image
+                          else attachment_markdown(path.name, _image_reference(dest)))
+        _set_status(status_label, f"添付: {path.name}", "#27ae60")
     except Exception as e:
         _set_status(status_label, f"Error: {e}", "#e74c3c")
 
@@ -456,7 +547,7 @@ def _handle_image_path(
 # --- UI ---
 
 class DropTextEdit(QTextEdit):
-    """画像ファイルのドロップに対応した QTextEdit。"""
+    """対応する画像・添付ファイルのドロップを受け付ける QTextEdit。"""
 
     image_dropped = Signal(Path)
 
@@ -470,7 +561,7 @@ class DropTextEdit(QTextEdit):
             Path(url.toLocalFile())
             for url in mime_data.urls()
             if url.isLocalFile()
-            and Path(url.toLocalFile()).suffix.lower() in IMAGE_EXTENSIONS
+            and Path(url.toLocalFile()).suffix.lower() in IMAGE_EXTENSIONS | ATTACHMENT_EXTENSIONS
         ]
 
     def dragEnterEvent(self, event):
@@ -565,7 +656,7 @@ class FragmentBoxWindow(QWidget):
         self.status_label.setStyleSheet("color: #aaaaaa; font-size: 11px;")
         bottom.addWidget(self.status_label, 1)
 
-        self.img_btn = QPushButton("IMG")
+        self.img_btn = QPushButton("添付")
         self.img_btn.setStyleSheet(_BTN_SS.format(pad="6px 10px", size=11, extra=""))
         self.img_btn.clicked.connect(self._pick_images)
         bottom.addWidget(self.img_btn)
@@ -642,15 +733,15 @@ class FragmentBoxWindow(QWidget):
         _handle_image_path(self.text_area, self.status_label, path)
 
     def _pick_images(self) -> None:
-        exts = " ".join(f"*{e}" for e in sorted(IMAGE_EXTENSIONS))
+        exts = " ".join(f"*{e}" for e in sorted(IMAGE_EXTENSIONS | ATTACHMENT_EXTENSIONS))
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select images", "", f"Images ({exts});;All files (*.*)"
+            self, "添付ファイルを選択", "", f"対応ファイル ({exts})"
         )
         for p in paths:
             _handle_image_path(self.text_area, self.status_label, Path(p))
 
     def _on_save(self) -> None:
-        content = self.text_area.toPlainText().strip()
+        content = self.text_area.toPlainText().rstrip()
         if not content:
             _set_status(self.status_label, "Please enter some text.", "#e74c3c")
             return

@@ -1,4 +1,9 @@
 import json
+import html
+import ipaddress
+import subprocess
+import sys
+import uuid
 import hashlib
 import os
 import re
@@ -45,18 +50,61 @@ class ImageLink(BaseModel):
     url: str | None = None
 
 
+class Attachment(BaseModel):
+    reference: str
+    asset: str
+    name: str
+    size: int | None
+
+
+ATTACHMENT_PATTERN = re.compile(r"(?<!!)\[([^\]\n]*)\]\(((?:\.\./)*assets/|/assets/)(attachment_[a-f0-9]{32}\.[a-z0-9]+)\)")
+
+
+def _attachment_path(name: str) -> Path:
+    if (not re.fullmatch(r"attachment_[a-f0-9]{32}\.[a-z0-9]+", name)
+            or Path(name).suffix not in capture.ATTACHMENT_EXTENSIONS):
+        raise HTTPException(422, "対応していない添付ファイルです")
+    path = ASSETS_DIR / name
+    if path.is_symlink() or not path.is_file():
+        raise HTTPException(404, "添付ファイルが見つかりません")
+    return path
+
+
+def attachment_links(content: str) -> list[Attachment]:
+    result = []
+    for match in ATTACHMENT_PATTERN.finditer(content):
+        try:
+            size = _attachment_path(match[3]).stat().st_size
+        except HTTPException:
+            size = None
+        result.append(Attachment(reference=match[2] + match[3], asset=match[3],
+                                 name=html.unescape(match[1]), size=size))
+    return result
+
+
+def _relative_attachment_references(content: str, directory: Path) -> str:
+    def replace(match: re.Match) -> str:
+        relative = Path(os.path.relpath(ASSETS_DIR / match[3], directory)).as_posix()
+        return f"[{match[1]}]({relative})"
+    return ATTACHMENT_PATTERN.sub(replace, content)
+
+
 class Fragment(BaseModel):
     id: str
     created_at: datetime
     content: str
     tags: list[str]
+    tag_lines: list[int] = Field(default_factory=list)
     image_links: list[ImageLink] = Field(default_factory=list)
+    attachments: list[Attachment] = Field(default_factory=list)
 
 
 class FavoriteResponse(BaseModel):
     status: str
     favorited: bool
     tags: list[str]
+    content: str
+    tag_lines: list[int]
 
 
 class DeleteResponse(BaseModel):
@@ -71,6 +119,7 @@ class FragmentUpdate(BaseModel):
 
 
 app = FastAPI()
+app.mount("/vendor", StaticFiles(directory=HERE / "vendor"), name="vendor")
 app.mount("/css", StaticFiles(directory=HERE / "css"), name="css")
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
@@ -279,7 +328,7 @@ def repair_image_links(fragment_id: str, body: FragmentUpdate, source: Source = 
     path = _fragment_path(source, folder, fragment_id)
     with _folder_lock:
         original = path.read_text(encoding="utf-8")
-        if original.strip() != body.content:
+        if original.rstrip() != body.content:
             raise HTTPException(409, "記事が変更されています。再読み込みしてから修正してください")
         corrections = {link.original: link.corrected for link in image_links(original, path) if link.status == "corrected"}
         def replace(match):
@@ -307,8 +356,8 @@ def repair_image_links(fragment_id: str, body: FragmentUpdate, source: Source = 
 
 
 def parse_fragment(path: Path) -> Fragment:
-    content = path.read_text(encoding="utf-8").strip()
-    tags = TAG_PATTERN.findall(content)
+    content = path.read_text(encoding="utf-8").rstrip()
+    tags = capture.extract_tags(content)
     try:
         dt = datetime.strptime(path.stem, "%Y%m%d_%H%M%S_%f" if path.stem.count("_") == 2 else "%Y%m%d_%H%M%S")
     except ValueError:
@@ -318,9 +367,26 @@ def parse_fragment(path: Path) -> Fragment:
         created_at=dt,
         content=content,
         tags=tags,
+        tag_lines=capture.tag_line_numbers(content),
         image_links=image_links(content, path),
+        attachments=attachment_links(content),
     )
 
+
+
+class TagAnalysis(BaseModel):
+    tags: list[str]
+    separator: str
+
+
+class TagContent(BaseModel):
+    content: str
+
+
+@app.post("/api/tags/analyze")
+def analyze_tags(body: TagContent) -> TagAnalysis:
+    return TagAnalysis(tags=capture.extract_tags(body.content),
+                       separator=capture._tag_separator(body.content))
 
 
 class FragmentCreate(BaseModel):
@@ -336,6 +402,8 @@ class ComposerConfig(BaseModel):
     tags: list[str]
     image_extensions: list[str]
     image_max_bytes: int
+    attachment_extensions: list[str]
+    attachment_max_bytes: int
 
 
 class ImageResponse(BaseModel):
@@ -349,7 +417,59 @@ _IMAGE_MAX_BYTES = 20 * 1024 * 1024
 def composer_config() -> ComposerConfig:
     return ComposerConfig(tags=_config.get("tags", {}).get("presets", []),
                           image_extensions=sorted(capture.IMAGE_EXTENSIONS),
-                          image_max_bytes=_IMAGE_MAX_BYTES)
+                          image_max_bytes=_IMAGE_MAX_BYTES,
+                          attachment_extensions=sorted(capture.ATTACHMENT_EXTENSIONS),
+                          attachment_max_bytes=capture.ATTACHMENT_MAX_BYTES)
+
+
+@app.post("/api/attachments", status_code=201)
+async def upload_attachment(request: Request, filename: str) -> ImageResponse:
+    _validate_name(filename)
+    suffix = Path(filename).suffix.lower()
+    if suffix not in capture.ATTACHMENT_EXTENSIONS:
+        raise HTTPException(422, "対応していないファイル形式です")
+    name = f"attachment_{uuid.uuid4().hex}{suffix}"
+    fd, temporary = tempfile.mkstemp(prefix=".upload-", dir=ASSETS_DIR)
+    try:
+        size = 0
+        with os.fdopen(fd, "wb") as stream:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > capture.ATTACHMENT_MAX_BYTES:
+                    raise HTTPException(413, "添付ファイルは100 MiB以下にしてください")
+                stream.write(chunk)
+        if not size:
+            raise HTTPException(422, "添付ファイルが空です")
+        os.replace(temporary, ASSETS_DIR / name)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return ImageResponse(markdown=capture.attachment_markdown(filename, f"/assets/{name}"))
+
+
+class OpenResponse(BaseModel):
+    status: str
+
+
+@app.post("/api/attachments/{name}/open")
+def open_attachment(name: str, request: Request) -> OpenResponse:
+    # カスタムヘッダーにより、他サイトのフォーム等からアプリを起動させない。
+    try:
+        local = request.client is not None and ipaddress.ip_address(request.client.host).is_loopback
+    except ValueError:
+        local = False
+    origin = request.headers.get("origin")
+    if (not local or request.url.hostname not in {"localhost", "127.0.0.1", "::1"}
+            or request.headers.get("x-fragmentbox-open") != "1"
+            or (origin and origin != str(request.base_url).rstrip("/"))):
+        raise HTTPException(403, "このMacのビューアから開いてください")
+    path = _attachment_path(name)
+    if sys.platform != "darwin":
+        raise HTTPException(422, "既定のアプリで開く操作はmacOS専用です")
+    try:
+        subprocess.run(["/usr/bin/open", str(path)], check=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(500, "既定のアプリで開けませんでした。対応するアプリを確認してください") from exc
+    return OpenResponse(status="opened")
 
 
 def _posting_dir(source: Source, folder: str) -> Path:
@@ -391,7 +511,8 @@ def _enrich_post(content: str) -> tuple[str, list[str]]:
     lines = content.splitlines(keepends=True)
     for i in range(len(lines) - 1, -1, -1):
         line = lines[i]
-        if line.lstrip().startswith(("![", "title:", "sitename:", "description:")):
+        if (line.lstrip().startswith(("![", "title:", "sitename:", "description:"))
+                or ATTACHMENT_PATTERN.fullmatch(line.strip())):
             continue
         has_title = False
         for following in lines[i + 1:]:
@@ -429,6 +550,7 @@ def _enrich_post(content: str) -> tuple[str, list[str]]:
 
 
 def _relative_image_references(content: str, directory: Path) -> str:
+    content = _relative_attachment_references(content, directory)
     # 添付時の共通URLを、選択された投稿先から解決可能な相対パスへ変換する。
     def image_reference(match: re.Match) -> str:
         name = match.group(2)
@@ -443,7 +565,7 @@ def _relative_image_references(content: str, directory: Path) -> str:
 @app.post("/api/fragments", status_code=201)
 def create_fragment(body: FragmentCreate, source: Source = "notes", folder: str = "") -> PostResponse:
     directory = _posting_dir(source, folder)
-    content = body.content.strip()
+    content = body.content.rstrip()
     if not content:
         raise HTTPException(422, "本文を入力してください")
     content, warnings = _enrich_post(content)
@@ -487,7 +609,7 @@ def get_tags(source: Source = "inbox", folder: str = "") -> list[str]:
         if path.is_symlink():
             continue
         content = path.read_text(encoding="utf-8")
-        tags.update(TAG_PATTERN.findall(content))
+        tags.update(capture.extract_tags(content))
     return sorted(tags)
 
 
@@ -496,19 +618,25 @@ def toggle_favorite(fragment_id: str, source: Source = "inbox", folder: str = ""
     with _folder_lock:
         path = _fragment_path(source, folder, fragment_id)
         content = path.read_text(encoding="utf-8").rstrip()
-        if "#favorite" in content:
-            content = re.sub(r"[ \t]*#favorite\b", "", content).rstrip()
+        if "favorite" in capture.extract_tags(content):
+            lines = content.splitlines(keepends=True)
+            for number in capture.tag_line_numbers(content):
+                lines[number] = re.sub(r"[ \t]*#favorite(?!\w)", "", lines[number])
+            content = "".join(lines).rstrip()
             favorited = False
         else:
-            content = content + " #favorite"
+            content += capture._tag_separator(content) + "#favorite"
             favorited = True
         path.write_text(content + "\n", encoding="utf-8")
-        return FavoriteResponse(status="ok", favorited=favorited, tags=TAG_PATTERN.findall(content))
+        return FavoriteResponse(status="ok", favorited=favorited, tags=capture.extract_tags(content),
+                                content=content, tag_lines=capture.tag_line_numbers(content))
 
 
 def _asset_references(content: str, note: Path) -> set[Path]:
     assets = ASSETS_DIR.resolve()
-    result = set()
+    result = {ASSETS_DIR.resolve() / match[3] for match in ATTACHMENT_PATTERN.finditer(content)
+              if Path(match[3]).suffix in capture.ATTACHMENT_EXTENSIONS
+              and not (ASSETS_DIR / match[3]).is_symlink()}
     for reference in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", content):
         if reference.startswith("/assets/"):
             candidate = ASSETS_DIR / reference[len("/assets/"):]
@@ -594,17 +722,11 @@ class TagRenameResponse(BaseModel):
 
 
 def _rename_tag_text(content: str, old: str, new: str) -> str:
-    result = []
-    for line in content.splitlines(keepends=True):
-        if line.lstrip().startswith(("title:", "sitename:", "description:", "![")):
-            result.append(line)
-            continue
-        # URLのフラグメント識別子はタグとして書き換えない。
-        parts = re.split(r"(https?://\S+)", line)
-        for index in range(0, len(parts), 2):
-            parts[index] = TAG_PATTERN.sub(lambda match: '#' + new if match[1] == old else match[0], parts[index])
-        result.append(''.join(parts))
-    return ''.join(result)
+    lines = content.splitlines(keepends=True)
+    for number in capture.tag_line_numbers(content):
+        lines[number] = TAG_PATTERN.sub(
+            lambda match: '#' + new if match[1] == old else match[0], lines[number])
+    return ''.join(lines)
 
 
 @app.post("/api/tags/rename")
@@ -710,8 +832,8 @@ def move_fragment(fragment_id: str, body: FragmentMove, source: Source = "inbox"
         try:
             with destination.open("xb") as target:
                 created = True
-                with path.open("rb") as original:
-                    shutil.copyfileobj(original, target)
+                content = _relative_attachment_references(path.read_bytes().decode("utf-8"), directory)
+                target.write(content.encode("utf-8"))
             shutil.copystat(path, destination)
             path.unlink()
         except FileExistsError as exc:
@@ -740,8 +862,8 @@ def archive_fragment(fragment_id: str, source: Source = "inbox", folder: str = "
             directory.mkdir(parents=True, exist_ok=True)
             with destination.open("xb") as target:
                 created = True
-                with path.open("rb") as original:
-                    shutil.copyfileobj(original, target)
+                content = _relative_attachment_references(path.read_bytes().decode("utf-8"), directory)
+                target.write(content.encode("utf-8"))
             shutil.copystat(path, destination)
             path.unlink()
         except FileExistsError as exc:
@@ -770,8 +892,8 @@ def restore_fragment(fragment_id: str, source: Source = "archive", folder: str =
             directory.mkdir(parents=True, exist_ok=True)
             with destination.open("xb") as target:
                 created = True
-                with path.open("rb") as original:
-                    shutil.copyfileobj(original, target)
+                content = _relative_attachment_references(path.read_bytes().decode("utf-8"), directory)
+                target.write(content.encode("utf-8"))
             shutil.copystat(path, destination)
             path.unlink()
         except FileExistsError as exc:

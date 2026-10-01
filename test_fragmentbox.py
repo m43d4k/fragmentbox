@@ -175,3 +175,21 @@ class TestDropTextEditPaste(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFileAttachments(unittest.TestCase):
+    def test_gui_attachment_keeps_bytes_and_original_label(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / '音 [素材].mid'
+            original.write_bytes(b'MThd test')
+            with patch.object(fragmentbox, 'ASSETS_DIR', root / 'assets'):
+                saved = fragmentbox.import_attachment(original)
+                self.assertEqual(saved.read_bytes(), original.read_bytes())
+                markdown = fragmentbox.attachment_markdown(original.name, '../assets/' + saved.name)
+                self.assertIn('音 &#91;素材&#93;.mid', markdown)
+                self.assertTrue(markdown.endswith('  \n'))
+                self.assertEqual(fragmentbox._find_urls_without_metadata(markdown), [])

@@ -21,3 +21,6 @@ mise.toml
 
 # UV
 uv.lock
+
+# Viewer test dependencies
+node_modules/

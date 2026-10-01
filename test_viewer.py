@@ -91,10 +91,10 @@ class TestParseFragment(unittest.TestCase):
     def test_content_stripped(self):
         path = self._write_temp_md("  前後に空白  \n\n", stem="20240315_093000")
         frag = viewer.parse_fragment(path)
-        self.assertEqual(frag.content, "前後に空白")
+        self.assertEqual(frag.content, "  前後に空白")
 
     def test_tags_extracted(self):
-        path = self._write_temp_md("アイデアメモ #idea #todo", stem="20240315_093000")
+        path = self._write_temp_md("アイデアメモ\n\n#idea #todo", stem="20240315_093000")
         frag = viewer.parse_fragment(path)
         self.assertIn("idea", frag.tags)
         self.assertIn("todo", frag.tags)
@@ -128,7 +128,7 @@ class TestUpdateFragment(unittest.TestCase):
     def test_tags_refreshed_after_update(self):
         self._make_file("20240315_093000", "元の内容")
         with patch.object(viewer, "_source_dir", return_value=self.tmp_dir):
-            body = viewer.FragmentUpdate(content="更新後 #newtag")
+            body = viewer.FragmentUpdate(content="更新後\n\n#newtag")
             frag = viewer.update_fragment("20240315_093000", body)
         self.assertIn("newtag", frag.tags)
 
@@ -186,10 +186,10 @@ class TestFolders(unittest.TestCase):
     def test_folder_selection_and_update(self):
         for name in ("音楽", "開発"):
             (self.root / name).mkdir()
-            (self.root / name / "same.md").write_text(name + " #test")
-        self.assertEqual(viewer.get_fragments("notes", "音楽")[0].content, "音楽 #test")
+            (self.root / name / "same.md").write_text(name + "\n\n#test")
+        self.assertEqual(viewer.get_fragments("notes", "音楽")[0].content, "音楽\n\n#test")
         viewer.update_fragment("same", viewer.FragmentUpdate(content="変更"), "notes", "音楽")
-        self.assertEqual((self.root / "開発/same.md").read_text(), "開発 #test")
+        self.assertEqual((self.root / "開発/same.md").read_text(), "開発\n\n#test")
         self.assertEqual(viewer.get_tags("notes", "開発"), ["test"])
 
     def test_symlinks_and_escape_rejected(self):
@@ -251,7 +251,7 @@ class TestPosting(unittest.TestCase):
         self.addCleanup(self.patcher.stop)
 
     def test_post_selected_folder_and_unique_names(self):
-        body = viewer.FragmentCreate(content="メモ #音楽")
+        body = viewer.FragmentCreate(content="メモ\n\n#音楽")
         first = viewer.create_fragment(body, "notes", "音楽")
         second = viewer.create_fragment(body, "notes", "音楽")
         self.assertNotEqual(first.fragment.id, second.fragment.id)
@@ -752,6 +752,155 @@ class TestArchiveFragment(unittest.TestCase):
                     self.assertEqual(destination.read_text(), content)
                 with self.assertRaises(HTTPException):
                     viewer.archive_fragment('test', 'archive', 'Music')
+
+
+
+
+class TestAttachments(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.assets = self.root / 'assets'
+        self.assets.mkdir()
+        self.inbox = self.root / 'inbox'
+        self.inbox.mkdir()
+        self.active = self.root / 'active'
+        self.active.mkdir()
+        (self.active / '資料').mkdir()
+        self.patcher = patch.multiple(viewer, ROOT_DIR=self.root, ASSETS_DIR=self.assets,
+                                     INBOX_DIR=self.inbox, ACTIVE_DIR=self.active,
+                                     ARCHIVE_DIR=self.root / 'archive')
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def request(self, data=b'', headers=True, client='127.0.0.1'):
+        from starlette.requests import Request
+        async def receive():
+            return {'type': 'http.request', 'body': data, 'more_body': False}
+        return Request({'type': 'http', 'method': 'POST', 'path': '/', 'scheme': 'http',
+                        'server': ('127.0.0.1', 8765), 'client': (client, 1234),
+                        'headers': [(b'host', b'127.0.0.1:8765')] +
+                        ([(b'x-fragmentbox-open', b'1')] if headers else [])}, receive)
+
+    def upload(self, name='余白 [資料].PDF', data=b'%PDF-1.4 test'):
+        import asyncio
+        return asyncio.run(viewer.upload_attachment(self.request(data), name))
+
+    def test_upload_card_move_archive_restore_delete(self):
+        uploaded = self.upload()
+        post = viewer.create_fragment(viewer.FragmentCreate(content=uploaded.markdown), 'inbox')
+        card = post.fragment.attachments[0]
+        self.assertEqual(card.name, '余白 [資料].PDF')
+        self.assertEqual(card.size, 13)
+        asset = self.assets / card.asset
+        self.assertEqual(asset.read_bytes(), b'%PDF-1.4 test')
+        viewer.move_fragment(post.fragment.id, viewer.FragmentMove(source='notes', folder='資料'), 'inbox')
+        viewer.archive_fragment(post.fragment.id, 'notes', '資料')
+        archived = viewer.parse_fragment(self.root / 'archive' / '資料' / f'{post.fragment.id}.md')
+        self.assertEqual(archived.attachments[0].size, 13)
+        viewer.restore_fragment(post.fragment.id, 'archive', '資料')
+        viewer.delete_fragment(post.fragment.id, 'notes', '資料')
+        self.assertFalse(asset.exists())
+
+    def test_edit_attaches_file_and_normalizes_reference(self):
+        post = viewer.create_fragment(viewer.FragmentCreate(content="元の記事"), 'inbox').fragment
+        uploaded = self.upload()
+        updated = viewer.update_fragment(post.id, viewer.FragmentUpdate(
+            content="編集済み\n" + uploaded.markdown, enrich_links=True), 'inbox')
+        self.assertEqual(updated.attachments[0].name, '余白 [資料].PDF')
+        self.assertIn('](../assets/attachment_', updated.content)
+        self.assertTrue(updated.content.startswith('編集済み\n'))
+        self.assertEqual(updated.attachments[0].size, 13)
+
+    def test_shared_attachment_survives_deletion(self):
+        upload = self.upload()
+        first = viewer.create_fragment(viewer.FragmentCreate(content=upload.markdown), 'inbox').fragment
+        second = viewer.create_fragment(viewer.FragmentCreate(content=upload.markdown), 'notes', '資料').fragment
+        viewer.delete_fragment(first.id, 'inbox')
+        self.assertTrue((self.assets / second.attachments[0].asset).exists())
+
+    def test_reject_bad_empty_oversize_upload_and_clean_up(self):
+        for name, data in [('run.command', b'x'), ('../doc.pdf', b'x'), ('empty.txt', b''), ('big.wav', b'1234')]:
+            with self.subTest(name=name), patch.object(viewer.capture, 'ATTACHMENT_MAX_BYTES', 3):
+                with self.assertRaises(HTTPException):
+                    self.upload(name, data)
+        self.assertEqual(list(self.assets.iterdir()), [])
+
+    def test_open_is_local_explicit_and_restricted(self):
+        uploaded = self.upload()
+        fragment = viewer.create_fragment(viewer.FragmentCreate(content=uploaded.markdown), 'inbox').fragment
+        asset = fragment.attachments[0].asset
+        with patch.object(viewer.sys, 'platform', 'darwin'), patch.object(viewer.subprocess, 'run') as run:
+            viewer.open_attachment(asset, self.request())
+            self.assertEqual(run.call_args.args[0], ['/usr/bin/open', str(self.assets / asset)])
+            for bad in [self.request(headers=False), self.request(client='192.168.1.2')]:
+                with self.assertRaises(HTTPException):
+                    viewer.open_attachment(asset, bad)
+            for name in ['../outside.pdf', 'manual.pdf', 'attachment_' + 'a' * 32 + '.command']:
+                with self.assertRaises(HTTPException):
+                    viewer.open_attachment(name, self.request())
+            (self.assets / asset).unlink()
+            (self.assets / asset).symlink_to(self.root / 'outside.pdf')
+            with self.assertRaises(HTTPException):
+                viewer.open_attachment(asset, self.request())
+            self.assertEqual(run.call_count, 1)
+
+
+class TestStandaloneTags(unittest.TestCase):
+    def test_non_tag_contexts_are_excluded(self):
+        contexts = [
+            '本文 #音楽', 'https://example.com/#音楽', '## #音楽',
+            '#音楽\n===', '#音楽\n---', 'title: #音楽',
+            '[#音楽](https://example.com)', '![#音楽](image.png)',
+            '```md\n#音楽\n```', '~~~\n#音楽\n~~~', '    #音楽', '\t#音楽',
+            '`start\n#音楽\nend`', '**`start\n#音楽\nend`**',
+            '> #音楽', '- #音楽', '<div>\n#音楽\n</div>',
+            '---\ntitle: example\n#音楽\n---', '+++\n#音楽\n+++',
+            '[label](https://example.com "start\n#音楽\nend")',
+        ]
+        for content in contexts:
+            with self.subTest(content=content):
+                self.assertEqual(viewer.capture.extract_tags(content), [])
+                self.assertEqual(viewer._rename_tag_text(content, '音楽', 'music'), content)
+
+    def test_standalone_lines_and_rename(self):
+        content = '本文 #音楽\r\n#音楽 #制作\r\n\r\n  #音楽 #tag_1  \r\n'
+        self.assertEqual(viewer.capture.extract_tags(content), ['音楽', '制作', 'tag_1'])
+        self.assertEqual(viewer._rename_tag_text(content, '音楽', 'music'),
+                         '本文 #音楽\r\n#music #制作\r\n\r\n  #music #tag_1  \r\n')
+
+    def test_api_preserves_indented_code_and_only_lists_real_tags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'note.md'
+            path.write_text('    #code\n\n本文 #body\n\n#real\n')
+            fragment = viewer.parse_fragment(path)
+            self.assertEqual(fragment.tags, ['real'])
+            self.assertEqual(fragment.tag_lines, [4])
+            with patch.object(viewer, '_source_dir', return_value=Path(tmp)):
+                self.assertEqual(viewer.get_tags(), ['real'])
+
+    def test_tag_button_analysis_ignores_body_and_code(self):
+        for content in ['本文 #音楽', '```\n#音楽\n```', '    #音楽']:
+            with self.subTest(content=content):
+                result = viewer.analyze_tags(viewer.TagContent(content=content))
+                self.assertEqual(result.tags, [])
+                self.assertEqual(result.separator, '\n\n')
+                self.assertFalse(viewer.capture._has_tag(content, '音楽'))
+        result = viewer.analyze_tags(viewer.TagContent(content='本文\n\n#音楽'))
+        self.assertEqual(result.tags, ['音楽'])
+        self.assertEqual(result.separator, ' ')
+
+    def test_favorite_preserves_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'note.md'
+            original = '本文 #favorite\n```\n#favorite\n```'
+            path.write_text(original)
+            with patch.object(viewer, '_fragment_path', return_value=path):
+                self.assertTrue(viewer.toggle_favorite('note').favorited)
+                self.assertEqual(path.read_text(), original + '\n\n#favorite\n')
+                self.assertFalse(viewer.toggle_favorite('note').favorited)
+                self.assertEqual(path.read_text().rstrip(), original)
 
 
 if __name__ == "__main__":

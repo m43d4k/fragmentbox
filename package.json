@@ -1,0 +1,11 @@
+{
+  "name": "fragmentbox-viewer-tests",
+  "private": true,
+  "engines": { "node": ">=22.22.1" },
+  "scripts": {
+    "test": "node --test test_viewer_ui.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "29.1.1"
+  }
+}

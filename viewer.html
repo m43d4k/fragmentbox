@@ -4,11 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>fragmentbox</title>
-  <link rel="stylesheet" href="/css/viewer.css?v=folder-move">
+  <link rel="stylesheet" href="/css/viewer.css?v=article-collapse">
 </head>
 <body>
 
-<aside id="folder-pane" aria-label="フォルダ">
+<aside id="folder-pane" aria-label="フォルダとタグ">
   <button id="add-folder" aria-label="フォルダを作成" title="フォルダを作成">+</button>
   <form id="folder-form" hidden>
     <input id="folder-name" aria-label="フォルダ名" placeholder="フォルダ名" required autocomplete="off">
@@ -20,6 +20,16 @@
     <button id="archive-link" type="button">archive</button>
     <nav id="archive-folders" aria-label="アーカイブ内のフォルダ"></nav>
   </div>
+<section id="tag-section" aria-labelledby="tag-heading">
+  <h2 id="tag-heading">タグ</h2>
+  <div id="tag-filters">
+    <div id="tag-controls">
+      <input id="tag-search" type="search" placeholder="タグを検索" aria-label="タグを検索" autocomplete="off">
+      <button id="tag-mode-btn" class="tag-mode-btn" title="Toggle AND/OR">AND</button>
+      <button id="tag-clear-btn" class="tag-clear-btn is-hidden" disabled aria-hidden="true">✕ Clear</button>
+    </div>
+  </div>
+</section>
 </aside>
 <main>
 <div id="viewer-scroll">
@@ -40,14 +50,6 @@
   </div>
 </header>
 
-<div id="tag-filter-slot">
-<div id="tag-filters">
-  <input id="tag-search" type="search" placeholder="タグを検索" aria-label="タグを検索" autocomplete="off">
-  <button id="tag-mode-btn" class="tag-mode-btn" title="Toggle AND/OR">AND</button>
-  <button id="tag-clear-btn" class="tag-clear-btn is-hidden" disabled aria-hidden="true">✕ Clear</button>
-</div>
-
-</div>
 <div id="fragments">
   <div id="count"></div>
   <div id="cards"></div>
@@ -64,7 +66,7 @@
   <div id="post-actions">
     <span id="post-status" role="status" aria-live="polite"></span>
     <input id="post-files" type="file" multiple hidden>
-    <button id="post-image" type="button">IMG</button>
+    <button id="post-image" type="button">添付</button>
     <button id="post-save" type="submit">Save</button>
   </div>
 </form>
@@ -84,9 +86,12 @@
   </div>
 </div>
 
+<script src="/vendor/marked.umd.js"></script>
+<script src="/vendor/purify.min.js"></script>
 <script>
   let allFragments = [];
   const editDrafts = new Map();
+  const expandedArticles = new Set();
   let activeTags = new Set();
   let searchQuery = "";
   let tagMode = "AND"; // "AND" | "OR"
@@ -104,6 +109,8 @@
   let composerReady = false;
   let imageExtensions = [];
   let imageMaxBytes = 0;
+  let attachmentExtensions = [];
+  let attachmentMaxBytes = 0;
 
   function readFolderSelection() {
     const saved = sessionStorage.getItem("fragmentbox.folder");
@@ -146,19 +153,25 @@
       const config = await request("/api/composer");
       imageExtensions = config.image_extensions;
       imageMaxBytes = config.image_max_bytes;
-      document.getElementById("post-files").accept = imageExtensions.join(",");
+      attachmentExtensions = config.attachment_extensions;
+      attachmentMaxBytes = config.attachment_max_bytes;
+      document.getElementById("post-files").accept = [...imageExtensions, ...attachmentExtensions].join(",");
       config.tags.forEach(tag => {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = `#${tag}`;
-        button.addEventListener("click", () => {
+        button.addEventListener("click", async () => {
           const text = document.getElementById("post-text");
-          const tags = [...text.value.matchAll(/#([\p{L}\p{N}_]+)/gu)].map(m => m[1]);
-          if (!tags.includes(tag)) {
-            const tail = text.value.match(/#[\p{L}\p{N}_]+([ \t]*)$/u);
-            text.value += (tail ? (tail[1] ? "" : " ") : "\n\n") + `#${tag}`;
-          }
-          text.focus();
+          const original = text.value;
+          try {
+            const result = await request("/api/tags/analyze", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ content: original }),
+            });
+            if (text.value !== original) return;
+            if (!result.tags.includes(tag)) text.value += result.separator + `#${tag}`;
+            text.focus();
+          } catch (error) { showError(error); }
         });
         document.getElementById("post-tags").appendChild(button);
       });
@@ -173,23 +186,29 @@
     return imageExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
   }
 
+  function supportedAttachment(file) {
+    return supportedImage(file) || attachmentExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
+  }
+
   async function attachImages(files) {
     if (composerBusy || folderBusy || !canPost()) return;
-    const images = [...files].filter(supportedImage);
+    const images = [...files].filter(supportedAttachment);
     if (!images.length) return;
     setComposerBusy(true);
     const status = document.getElementById("post-status");
     const text = document.getElementById("post-text");
     try {
       for (const file of images) {
-        if (file.size > imageMaxBytes) throw new Error(`${file.name}: 画像は20 MiB以下にしてください`);
-        status.textContent = `画像を保存中: ${file.name}`;
-        const result = await request(`/api/images?${new URLSearchParams({ filename: file.name })}`, {
+        const isImage = supportedImage(file);
+        const limit = isImage ? imageMaxBytes : attachmentMaxBytes;
+        if (file.size > limit) throw new Error(`${file.name}: ${limit / 1024 / 1024} MiB以下にしてください`);
+        status.textContent = `添付ファイルを保存中: ${file.name}`;
+        const result = await request(`/api/${isImage ? "images" : "attachments"}?${new URLSearchParams({ filename: file.name })}`, {
           method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
         });
         text.value += (text.value && !text.value.endsWith("\n") ? "  \n" : "") + result.markdown;
       }
-      status.textContent = "画像を添付しました";
+      status.textContent = "ファイルを添付しました";
     } catch (error) { status.textContent = error.message; }
     finally { setComposerBusy(false); text.focus(); document.getElementById("post-files").value = ""; }
   }
@@ -202,11 +221,11 @@
     const files = [...e.dataTransfer.items].filter(item => item.kind === "file");
     if (files.some(item => {
       const file = item.getAsFile();
-      return file ? supportedImage(file) : ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "image/bmp", "image/x-ms-bmp", "image/tiff"].includes(item.type);
+      return file ? supportedAttachment(file) : true;
     })) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }
   });
   postText.addEventListener("drop", e => {
-    if ([...e.dataTransfer.files].some(supportedImage)) {
+    if ([...e.dataTransfer.files].some(supportedAttachment)) {
       e.preventDefault();
       attachImages(e.dataTransfer.files);
     }
@@ -508,89 +527,9 @@
     viewerScroll.addEventListener(event, () => { restoringScroll = null; }, { passive: true });
   }
 
-  function tagScrollState(state, delta, hidden, restoring) {
-    if (!hidden) return { direction: 0, distance: 0, visible: false };
-    if (restoring) return { direction: 0, distance: 0, visible: state.visible };
-    if (!delta) return state;
-    const direction = Math.sign(delta);
-    const distance = (direction === state.direction ? state.distance : 0) + Math.abs(delta);
-    let visible = state.visible;
-    if (direction < 0 && distance >= 24) visible = true;
-    if (direction > 0 && distance >= 300) visible = false;
-    return { direction, distance: Math.min(distance, 300), visible };
-  }
-
-  const tagFilterSlot = document.getElementById("tag-filter-slot");
-  const tagFilterBar = document.getElementById("tag-filters");
-  let tagScroll = { direction: 0, distance: 0, visible: false };
-  let lastTagScrollTop = viewerScroll.scrollTop;
-
-  let tagSlideAnimation = null;
-  let floatingTagsVisible = false;
-
-  function clearFloatingTags() {
-    tagFilterBar.classList.remove("is-floating");
-    tagFilterBar.style.removeProperty("top");
-    tagFilterBar.style.removeProperty("left");
-    tagFilterBar.style.removeProperty("width");
-    tagFilterSlot.style.removeProperty("height");
-  }
-
-  function positionFloatingTags(visible, immediate = false) {
-    if (immediate) {
-      tagSlideAnimation?.cancel();
-      tagSlideAnimation = null;
-      floatingTagsVisible = false;
-      clearFloatingTags();
-      return;
-    }
-    if (visible === floatingTagsVisible) return;
-    floatingTagsVisible = visible;
-    const wasFloating = tagFilterBar.classList.contains("is-floating");
-    const from = tagSlideAnimation ? getComputedStyle(tagFilterBar).transform
-      : visible ? "translateY(-100%)" : "translateY(0)";
-    tagSlideAnimation?.cancel();
-    if (visible) {
-      if (!wasFloating) tagFilterSlot.style.height = `${tagFilterBar.getBoundingClientRect().height}px`;
-      const viewport = viewerScroll.getBoundingClientRect();
-      const header = viewerScroll.querySelector("header").getBoundingClientRect();
-      tagFilterBar.style.top = `${header.bottom}px`;
-      tagFilterBar.style.left = `${viewport.left}px`;
-      tagFilterBar.style.width = `${viewerScroll.clientWidth}px`;
-      tagFilterBar.classList.add("is-floating");
-    }
-    const animation = tagFilterBar.animate(
-      [{ transform: from }, { transform: visible ? "translateY(0)" : "translateY(-100%)" }],
-      { duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180, easing: "ease-out", fill: "forwards" },
-    );
-    tagSlideAnimation = animation;
-    animation.onfinish = () => {
-      if (tagSlideAnimation !== animation) return;
-      if (!floatingTagsVisible) clearFloatingTags();
-      animation.cancel();
-      tagSlideAnimation = null;
-    };
-  }
-
-  function resetFloatingTags() {
-    tagScroll = { direction: 0, distance: 0, visible: false };
-    positionFloatingTags(false, true);
-    lastTagScrollTop = viewerScroll.scrollTop;
-  }
-
-  viewerScroll.addEventListener("scroll", () => {
-    const current = Math.max(0, viewerScroll.scrollTop);
-    const delta = current - lastTagScrollTop;
-    lastTagScrollTop = current;
-    const hidden = tagFilterSlot.getBoundingClientRect().bottom <= viewerScroll.querySelector("header").getBoundingClientRect().bottom;
-    tagScroll = tagScrollState(tagScroll, delta, hidden, Boolean(restoringScroll));
-    positionFloatingTags(tagScroll.visible, !hidden);
-  }, { passive: true });
-  window.addEventListener("resize", resetFloatingTags);
-
   // --- データ取得 ---
   async function load() {
-    resetFloatingTags();
+    expandedArticles.clear();
     closeTagSuggestions();
     rememberScrollPosition();
     const version = ++loadVersion;
@@ -614,8 +553,7 @@
   function visibleArticleTop() {
     const viewport = viewerScroll.getBoundingClientRect();
     const header = document.querySelector("#viewer-scroll > header");
-    const floatingTags = document.querySelector("#tag-filters.is-floating");
-    return Math.max(viewport.top, header ? header.getBoundingClientRect().bottom : viewport.top, floatingTags ? floatingTags.getBoundingClientRect().bottom : viewport.top);
+    return Math.max(viewport.top, header ? header.getBoundingClientRect().bottom : viewport.top);
   }
 
   function renderTagChange() {
@@ -639,7 +577,9 @@
   function renderTagFilters(tags) {
     const container = document.getElementById("tag-filters");
     // トグルボタンを残してタグボタンだけ削除
-    [...container.querySelectorAll(".tag-btn")].forEach(el => el.remove());
+    [...container.querySelectorAll(".tag-btn, .geo-tag-group")].forEach(el => el.remove());
+    const geoGroup = document.createElement("div");
+    geoGroup.className = "geo-tag-group";
     tags.forEach(tag => {
       const btn = document.createElement("button");
       btn.className = "tag-btn";
@@ -661,8 +601,9 @@
         }
         renderTagChange();
       });
-      container.appendChild(btn);
+      (tag.startsWith("geo_") ? geoGroup : container).appendChild(btn);
     });
+    container.appendChild(geoGroup);
     applyTagSearch();
   }
 
@@ -676,6 +617,8 @@
     document.querySelectorAll("#tag-filters .tag-btn").forEach(button => {
       button.hidden = !tagMatchesSearch(button.dataset.tag, query, activeTags.has(button.dataset.tag));
     });
+    const geoGroup = document.querySelector("#tag-filters .geo-tag-group");
+    if (geoGroup) geoGroup.hidden = ![...geoGroup.querySelectorAll(".tag-btn")].some(button => !button.hidden);
   }
 
   document.getElementById("tag-search").addEventListener("input", applyTagSearch);
@@ -784,14 +727,88 @@
       .replace(/"/g, "&quot;");
   }
 
-  function renderLine(raw, imageLinks = [], repairId = null) {
+  function renderMarkdownContent(content, imageLinks = [], repairId = null, attachments = [], tagLines = []) {
+    if (!content) return "";
+    // Protect only server-recognized tag lines before parsing Markdown.
+    const prefix = `FRAGMENTBOXTAG${crypto.randomUUID().replaceAll("-", "")}X`;
+    const lines = content.split("\n");
+    const tags = new Map();
+    tagLines.forEach(number => {
+      const marker = `${prefix}${number}Z`;
+      tags.set(marker, lines[number]);
+      lines[number] = marker;
+    });
+    const parser = new marked.Marked({ breaks: true });
+    parser.use({ renderer: {
+      html(token) { return escapeHtml(token.text); },
+      image(token) {
+        // Keep image reference checks, repairs, and the lightbox.
+        return renderLine(`![${token.text}](${token.href})`, imageLinks, repairId, attachments);
+      },
+      link(token) {
+        if (/^(?:\.\.\/)*assets\/attachment_[a-f0-9]{32}\.[a-z0-9]+$/.test(token.href)
+            || /^\/assets\/attachment_[a-f0-9]{32}\.[a-z0-9]+$/.test(token.href)) {
+          return renderLine(token.raw, imageLinks, repairId, attachments);
+        }
+        return false;
+      },
+      paragraph(token) {
+        const rawLines = token.raw.trimEnd().split("\n");
+        const result = [];
+        let previous = 0;
+        for (let i = 0; i < rawLines.length; i++) {
+          if (!/^https?:\/\/\S+$/.test(rawLines[i].trim())) continue;
+          let end = i + 1;
+          let title = false;
+          while (end < rawLines.length && /^(title|sitename|description):/.test(rawLines[end])) {
+            if (/^title:\s*\S/.test(rawLines[end])) title = true;
+            end++;
+          }
+          if (!title) continue;
+          while (end < rawLines.length && /^!\[[^\]]*\]\([^)]+\)$/.test(rawLines[end].trimEnd())) end++;
+          if (i > previous) result.push(parser.parse(rawLines.slice(previous, i).join("\n")));
+          result.push(renderContent(rawLines.slice(i, end).join("\n"), imageLinks, repairId, attachments));
+          previous = end;
+          i = end - 1;
+        }
+        if (!result.length) return false;
+        if (previous < rawLines.length) result.push(parser.parse(rawLines.slice(previous).join("\n")));
+        return result.join("");
+      },
+    } });
+    // Raw HTML is escaped; sanitization also rejects unsafe Markdown link URLs.
+    let result = DOMPurify.sanitize(parser.parse(lines.join("\n")), {
+      USE_PROFILES: { html: true }, FORBID_ATTR: ["style"], ADD_ATTR: ["target"],
+    });
+    tags.forEach((line, marker) => {
+      const spans = escapeHtml(line).replace(/#([\p{L}\p{N}_]+)/gu,
+        '<span class="tag-inline" data-tag="$1">#$1</span>');
+      result = result.replaceAll(marker, spans);
+    });
+    return result;
+  }
+
+  function renderLine(raw, imageLinks = [], repairId = null, attachments = [], isTagLine = false) {
     // 行末スペース2つ（Markdown強制改行）を除去
     const line = raw.replace(/  $/, "");
 
     if (!line) return `<div class="line-empty"></div>`;
 
+    const attachmentMatch = line.match(/^\[[^\]]*\]\(((?:\.\.\/)*assets\/|\/assets\/)(attachment_[a-f0-9]{32}\.[a-z0-9]+)\)$/);
+    if (attachmentMatch) {
+      const asset = attachmentMatch[2];
+      const file = attachments.find(item => item.asset === asset);
+      if (!file || file.size === null) return `<div class="image-link-warning">添付ファイルが見つかりません: ${escapeHtml(file?.name || asset)}</div>`;
+      const ext = asset.split(".").pop();
+      const audio = ["mp3", "wav", "aiff", "aif", "flac", "m4a", "ogg"].includes(ext);
+      const kind = ext === "pdf" ? "pdf" : audio ? "audio" : ["mid", "midi"].includes(ext) ? "midi" : "text";
+      const symbol = { pdf: "PDF", audio: "♪", midi: "MIDI", text: "TXT" }[kind];
+      const size = file.size < 1024 ? `${file.size} B` : file.size < 1024 ** 2 ? `${(file.size / 1024).toFixed(1)} KB` : `${(file.size / 1024 ** 2).toFixed(2)} MB`;
+      return `<div class="attachment-card"><span class="attachment-icon attachment-${kind}" aria-hidden="true">${symbol}</span><div class="attachment-info"><a class="attachment-open" href="/assets/${asset}" data-asset="${asset}" title="既定のアプリで開く">${escapeHtml(file.name)}</a><span class="attachment-size">${size}</span></div><a class="attachment-download" href="/assets/${asset}" download="${escapeHtml(file.name)}" title="元のファイル名でダウンロード" aria-label="${escapeHtml(file.name)}をダウンロード"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></svg></a></div>`;
+    }
+
     // Markdown画像: ![alt](path) 単独行
-    const imgMatch = line.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+    const imgMatch = line.match(/^!\[(.*)\]\((.*)\)$/);
     if (imgMatch) {
       const alt = imgMatch[1];
       const link = imageLinks.find(link => link.original === imgMatch[2]);
@@ -813,11 +830,11 @@
     // 通常行: URL・タグをハイライト
     let html = escapeHtml(line);
     html = html.replace(/(https?:\/\/\S+)/g, '<a class="url" href="$1" target="_blank" rel="noopener">$1</a>');
-    html = html.replace(/#([\p{L}\p{N}_]+)/gu, '<span class="tag-inline" data-tag="$1">#$1</span>');
+    if (isTagLine) html = html.replace(/#([\p{L}\p{N}_]+)/gu, '<span class="tag-inline" data-tag="$1">#$1</span>');
     return `<div class="line-text">${html}</div>`;
   }
 
-  function renderContent(content, imageLinks = [], repairId = null) {
+  function renderContent(content, imageLinks = [], repairId = null, attachments = [], tagLines = []) {
     const lines = content.split("\n").map(l => l.replace(/  $/, ""));
     const result = [];
     let lastWasEmpty = false;
@@ -849,7 +866,7 @@
           // メタデータ直後の連続画像を同じリンクにまとめる。
           const thumbnails = [];
           while (j < lines.length && /^!\[[^\]]*\]\([^)]+\)$/.test(lines[j])) {
-            thumbnails.push(`<div class="link-thumbnail">${renderLine(lines[j], imageLinks, repairId)}</div>`);
+            thumbnails.push(`<div class="link-thumbnail">${renderLine(lines[j], imageLinks, repairId, attachments)}</div>`);
             j++;
           }
           if (thumbnails.length) html += `<div class="link-thumbnails${thumbnails.length > 1 ? " multiple" : ""}">${thumbnails.join("")}</div>`;
@@ -865,7 +882,7 @@
         continue;
       }
 
-      const rendered = renderLine(line, imageLinks, repairId);
+      const rendered = renderLine(line, imageLinks, repairId, attachments, tagLines.includes(i));
       const isEmpty = rendered.includes("line-empty");
       if (isEmpty && lastWasEmpty) { i++; continue; }
       lastWasEmpty = isEmpty;
@@ -917,18 +934,47 @@
 
   function renderArticleBody(fragment) {
     const draft = editDrafts.get(editKey(fragment.id));
-    if (!draft) return renderContent(fragment.content, fragment.image_links, fragment.id);
+    if (!draft) {
+      const characters = Array.from(fragment.content);
+      const long = characters.length > 2000;
+      const expanded = long && expandedArticles.has(editKey(fragment.id));
+      const content = long && !expanded ? characters.slice(0, 2000).join("") : fragment.content;
+      const lines = content.split("\n");
+      const tagLines = (fragment.tag_lines || []).filter(number =>
+        number < lines.length && (!long || expanded || number < lines.length - 1));
+      const body = renderMarkdownContent(content, fragment.image_links, fragment.id, fragment.attachments, tagLines);
+      return body + (long ? `<button type="button" class="article-expand-btn" data-id="${escapeHtml(fragment.id)}" aria-expanded="${expanded}">${expanded ? "折りたたむ" : "続きを読む"}</button>` : "");
+    }
     if (!draft.parts) draft.parts = splitEditParts(draft.content);
     const parts = draft.parts.map((part, index) => part.type === "link"
-      ? `<div class="edit-link-card">${renderContent(part.raw, fragment.image_links)}<button type="button" class="edit-remove-link" data-part="${index}" aria-label="リンクカードを削除" ${draft.busy ? "disabled" : ""}>×</button></div>`
+      ? `<div class="edit-link-card">${renderContent(part.raw, fragment.image_links, null, fragment.attachments)}<button type="button" class="edit-remove-link" data-part="${index}" aria-label="リンクカードを削除" ${draft.busy ? "disabled" : ""}>×</button></div>`
       : `<textarea class="edit-textarea" data-part="${index}" aria-label="記事本文" spellcheck="false" ${draft.busy ? "disabled" : ""}>${escapeHtml(part.raw)}</textarea>`).join("");
     return `<div class="inline-editor">${parts}
       <div class="edit-error" role="alert">${escapeHtml(draft.error || "")}</div>
       <div class="edit-buttons">
+        <input class="edit-files" type="file" multiple hidden>
+        <button type="button" class="edit-attach" ${draft.busy ? "disabled" : ""}>${draft.uploading ? "添付中…" : "添付"}</button>
         <button class="edit-cancel" ${draft.busy ? "disabled" : ""}>Cancel</button>
-        <button class="edit-save" ${draft.busy ? "disabled" : ""}>${draft.busy ? "保存中…" : "Save"}</button>
+        <button class="edit-save" ${draft.busy ? "disabled" : ""}>${draft.busy && !draft.uploading ? "保存中…" : "Save"}</button>
       </div>
     </div>`;
+  }
+
+  function toggleArticleExpansion(button) {
+    const fragment = allFragments.find(item => item.id === button.dataset.id);
+    if (!fragment || editDrafts.has(editKey(fragment.id))) return;
+    const key = editKey(fragment.id);
+    const collapsing = expandedArticles.has(key);
+    if (collapsing) expandedArticles.delete(key);
+    else expandedArticles.add(key);
+    const card = button.closest(".card");
+    restoringScroll = null;
+    card.querySelector(".card-body").innerHTML = renderArticleBody(fragment);
+    if (collapsing) {
+      const offset = card.getBoundingClientRect().top - visibleArticleTop();
+      if (offset < 0) viewerScroll.scrollTop += offset;
+    }
+    card.querySelector(".article-expand-btn")?.focus({ preventScroll: true });
   }
 
   function formatDatetime(iso) {
@@ -1242,6 +1288,43 @@
   postText.addEventListener("keydown", handleTagSuggestionKey);
   document.getElementById("composer").addEventListener("submit", closeTagSuggestions);
 
+  async function attachEditFiles(id, files) {
+    const draft = editDrafts.get(editKey(id));
+    if (!draft || draft.busy || !composerReady) return;
+    const selected = [...files];
+    if (!selected.length) return;
+    const scope = scopeQuery().toString();
+    draft.busy = true;
+    draft.uploading = true;
+    draft.error = "";
+    closeTagSuggestions();
+    render();
+    try {
+      for (const file of selected) {
+        if (!supportedAttachment(file)) throw new Error(`${file.name}: 対応していないファイル形式です`);
+        const isImage = supportedImage(file);
+        const limit = isImage ? imageMaxBytes : attachmentMaxBytes;
+        if (file.size > limit) throw new Error(`${file.name}: ${limit / 1024 / 1024} MiB以下にしてください`);
+        const result = await request(`/api/${isImage ? "images" : "attachments"}?${new URLSearchParams({ filename: file.name })}`, {
+          method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+        });
+        draft.content += (draft.content && !draft.content.endsWith("\n") ? "  \n" : "") + result.markdown;
+        draft.parts = splitEditParts(draft.content);
+      }
+    } catch (error) { draft.error = error.message; }
+    finally {
+      draft.busy = false;
+      draft.uploading = false;
+      if (scope === scopeQuery().toString()) render();
+    }
+  }
+
+  document.getElementById("cards").addEventListener("change", e => {
+    if (e.target.classList.contains("edit-files")) {
+      attachEditFiles(e.target.closest(".card").dataset.id, e.target.files);
+    }
+  });
+
   async function saveEdit(id) {
     const key = editKey(id);
     const draft = editDrafts.get(key);
@@ -1374,6 +1457,25 @@
   });
 
   document.getElementById("cards").addEventListener("click", async e => {
+    const expandButton = e.target.closest(".article-expand-btn");
+    if (expandButton) {
+      toggleArticleExpansion(expandButton);
+      return;
+    }
+    const attachment = e.target.closest(".attachment-open");
+    if (attachment) {
+      e.preventDefault();
+      if (attachment.getAttribute("aria-busy") === "true") return;
+      attachment.setAttribute("aria-busy", "true");
+      try {
+        await request(`/api/attachments/${encodeURIComponent(attachment.dataset.asset)}/open`, {
+          method: "POST", headers: { "X-Fragmentbox-Open": "1" },
+        });
+      } catch (error) { showError(error); }
+      finally { attachment.removeAttribute("aria-busy"); }
+      return;
+    }
+
     if (e.target.classList.contains("article-menu-btn")) {
       const menu = e.target.parentElement.querySelector(".article-menu");
       const opening = menu.hidden;
@@ -1445,6 +1547,21 @@
       }
       return;
     }
+    if (e.target.classList.contains("edit-attach")) {
+      const card = e.target.closest(".card");
+      const draft = editDrafts.get(editKey(card.dataset.id));
+      if (!draft || draft.busy) return;
+      if (!composerReady) {
+        draft.error = "添付設定を取得できていません。ページを再読み込みしてください。";
+        render();
+        return;
+      }
+      const input = card.querySelector(".edit-files");
+      input.accept = [...imageExtensions, ...attachmentExtensions].join(",");
+      input.value = "";
+      input.click();
+      return;
+    }
     if (e.target.classList.contains("edit-save") || e.target.classList.contains("edit-cancel")) {
       const id = e.target.closest(".card").dataset.id;
       if (e.target.classList.contains("edit-save")) await saveEdit(id);
@@ -1464,7 +1581,7 @@
         const data = await request(`/api/fragments/${encodeURIComponent(id)}/favorite?${scope}`, { method: "PATCH" });
         if (scope !== scopeQuery().toString()) return;
         const frag = allFragments.find(f => f.id === id);
-        if (frag) frag.tags = data.tags;
+        if (frag) Object.assign(frag, { tags: data.tags, content: data.content, tag_lines: data.tag_lines });
         renderTagChange();
       } catch (error) { showError(error); }
       return;
