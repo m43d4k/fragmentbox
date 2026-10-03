@@ -4,32 +4,45 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>fragmentbox</title>
-  <link rel="stylesheet" href="/css/viewer.css?v=search-panel">
+  <link rel="stylesheet" href="/css/viewer.css?v=sidebar-navigation">
 </head>
 <body>
 
 <aside id="folder-pane" aria-label="フォルダとタグ">
-  <button id="add-folder" aria-label="フォルダを作成" title="フォルダを作成">+</button>
+  <div id="sidebar-head">
+    <div class="brand-mark" aria-hidden="true">f</div>
+    <div><p class="eyebrow">LOCAL VAULT</p><h2>FragmentBox</h2></div>
+  </div>
+  <div id="area-switch" role="group" aria-label="記事の範囲">
+    <button id="general-link" type="button" aria-pressed="true">General</button>
+    <button id="archive-link" type="button" aria-pressed="false">Archive</button>
+  </div>
+  <section id="folder-section" aria-labelledby="folder-heading">
+  <div class="sidebar-section-heading">
+    <h2 id="folder-heading">フォルダ</h2>
+    <span id="folder-count" class="section-count" aria-label="フォルダ数">0</span>
+    <button id="add-folder" aria-label="フォルダを作成" title="フォルダを作成">+</button>
+  </div>
   <form id="folder-form" hidden>
     <input id="folder-name" aria-label="フォルダ名" placeholder="フォルダ名" required autocomplete="off">
     <button type="submit">作成</button>
     <button id="folder-cancel" type="button">取消</button>
   </form>
   <nav id="folder-list" aria-label="フォルダ一覧"></nav>
-  <div id="archive-section">
-    <button id="archive-link" type="button">archive</button>
-    <nav id="archive-folders" aria-label="アーカイブ内のフォルダ"></nav>
-  </div>
+  <nav id="archive-folders" aria-label="アーカイブ内のフォルダ" hidden></nav>
+  <p id="folder-empty" hidden>フォルダはありません</p>
+  </section>
 <section id="tag-section" aria-labelledby="tag-heading">
-  <h2 id="tag-heading">タグ</h2>
+  <div class="sidebar-section-heading"><h2 id="tag-heading">タグ</h2><span id="tag-count" class="section-count" aria-label="タグ数">0</span></div>
   <div id="tag-filters">
     <div id="tag-controls">
       <input id="tag-search" type="search" placeholder="タグを検索" aria-label="タグを検索" autocomplete="off">
       <button id="tag-mode-btn" class="tag-mode-btn" title="Toggle AND/OR">AND</button>
-      <button id="tag-clear-btn" class="tag-clear-btn is-hidden" disabled aria-hidden="true">✕ Clear</button>
+      <button id="tag-clear-btn" class="tag-clear-btn" disabled>Clear</button>
     </div>
   </div>
 </section>
+  <div id="sidebar-foot">ローカル保存 · General</div>
 </aside>
 <main>
 <div id="viewer-scroll">
@@ -107,6 +120,7 @@
 <script src="/vendor/purify.min.js"></script>
 <script>
   let allFragments = [];
+  let fragmentsReady = false;
   const editDrafts = new Map();
   const expandedArticles = new Set();
   const searchExpandedArticles = new Set();
@@ -303,17 +317,38 @@
 
   function renderFolders() {
     updateComposer();
+    const archive = currentSource === "archive";
+    const busy = folderBusy || composerBusy;
     const list = document.getElementById("folder-list");
     list.replaceChildren();
-    document.getElementById("add-folder").disabled = folderBusy || composerBusy;
-    document.getElementById("archive-link").disabled = folderBusy || composerBusy;
-    document.getElementById("archive-link").setAttribute("aria-current", String(currentSource === "archive" && !currentFolder));
+    list.hidden = archive;
+    document.getElementById("add-folder").disabled = busy;
+    document.getElementById("add-folder").hidden = archive;
+    for (const [id, selected] of [["general-link", !archive], ["archive-link", archive]]) {
+      document.getElementById(id).disabled = busy;
+      document.getElementById(id).setAttribute("aria-pressed", String(selected));
+    }
+    document.getElementById("folder-count").textContent = String((archive ? archiveFolders : folders).length);
+    document.getElementById("folder-empty").hidden = (archive ? archiveFolders : folders).length > 0;
+    document.getElementById("sidebar-foot").textContent = `ローカル保存 · ${archive ? "Archive" : "General"}`;
     const archiveList = document.getElementById("archive-folders");
     archiveList.replaceChildren();
-    if (currentSource === "archive") {
+    archiveList.hidden = !archive;
+    function folderLabel(button, folder) {
+      const name = document.createElement("span");
+      name.className = "folder-label";
+      name.textContent = folder.name;
+      const count = document.createElement("span");
+      count.className = "folder-count";
+      count.textContent = folder.count == null ? "—" : String(folder.count);
+      button.append(name, count);
+    }
+    if (archive) {
       archiveFolders.forEach(folder => {
         const button = document.createElement("button");
-        button.textContent = folder.name;
+        folderLabel(button, folder);
+        button.dataset.source = "archive";
+        button.dataset.folder = folder.name;
         button.setAttribute("aria-current", String(currentFolder === folder.name));
         button.disabled = folderBusy || composerBusy;
         button.addEventListener("click", () => selectFolder("archive", folder.name));
@@ -322,7 +357,9 @@
     }
     folders.forEach(folder => {
       const button = document.createElement("button");
-      button.textContent = folder.name;
+      folderLabel(button, folder);
+      button.dataset.source = folder.source;
+      button.dataset.folder = folder.folder;
       button.className = "folder-name";
       button.dataset.folderId = folder.id;
       button.setAttribute("aria-current", String(folder.source === currentSource && folder.folder === currentFolder));
@@ -360,6 +397,28 @@
       });
       list.appendChild(button);
     });
+  }
+
+  function updateSidebarCounts() {
+    if (!fragmentsReady) return;
+    const entry = currentSource === "archive"
+      ? archiveFolders.find(folder => folder.name === currentFolder)
+      : folders.find(folder => folder.source === currentSource && folder.folder === currentFolder);
+    if (entry) entry.count = allFragments.length;
+    document.querySelectorAll("#folder-list button, #archive-folders button").forEach(button => {
+      const folder = button.dataset.source === "archive"
+        ? archiveFolders.find(folder => folder.name === button.dataset.folder)
+        : folders.find(folder => folder.source === button.dataset.source && folder.folder === button.dataset.folder);
+      if (folder) button.querySelector(".folder-count").textContent = folder.count == null ? "—" : String(folder.count);
+    });
+    const counts = new Map();
+    allFragments.forEach(fragment => new Set(fragment.tags).forEach(tag => counts.set(tag, (counts.get(tag) || 0) + 1)));
+    const buttons = [...document.querySelectorAll("#tag-filters .tag-btn")];
+    if (buttons.length !== counts.size || buttons.some(button => !counts.has(button.dataset.tag))) {
+      renderTagFilters([...counts.keys()].sort());
+    } else {
+      buttons.forEach(button => { button.querySelector(".tag-count").textContent = String(counts.get(button.dataset.tag)); });
+    }
   }
 
   function changeFolderState(oldName, newName) {
@@ -466,10 +525,22 @@
         source === "archive" ? request("/api/folders?source=archive") : Promise.resolve([]),
       ]);
       if (source !== currentSource) return;
-      folders = result;
-      archiveFolders = archived;
+      const missingCounts = [...result, ...archived].some(folder => folder.count == null);
+      function preserveCounts(entries, previous, key) {
+        const counts = new Map(previous.map(folder => [folder[key], folder.count]));
+        return entries.map(folder => ({ ...folder, count: folder.count ?? counts.get(folder[key]) }));
+      }
+      folders = preserveCounts(result, folders, "id");
+      if (source === "archive") archiveFolders = preserveCounts(archived, archiveFolders, "name");
+      if (currentSource === "archive" && !currentFolder && archiveFolders.length) {
+        currentFolder = archiveFolders[0].name;
+        rememberFolderSelection();
+      }
       renderFolders();
       await load();
+      if (missingCounts && source === currentSource) {
+        showError(new Error("フォルダ件数を取得できません。ビューアを再起動してページを再読み込みしてください。未取得の件数は「—」で表示します。"));
+      }
     } catch (error) { showError(error); }
   }
 
@@ -558,6 +629,7 @@
     closeTagSuggestions();
     rememberScrollPosition();
     const version = ++loadVersion;
+    fragmentsReady = false;
     allFragments = [];
     renderTagFilters([]);
     render();
@@ -568,6 +640,7 @@
       ]);
       if (version !== loadVersion) return;
       allFragments = frags;
+      fragmentsReady = true;
       renderTagFilters(tags);
       render();
       restoreScrollPosition(query.toString());
@@ -608,7 +681,14 @@
     tags.forEach(tag => {
       const btn = document.createElement("button");
       btn.className = "tag-btn";
-      btn.textContent = `#${tag}`;
+      const label = document.createElement("span");
+      label.className = "tag-label";
+      label.textContent = `# ${tag}`;
+      const count = document.createElement("span");
+      count.className = "tag-count";
+      count.textContent = String(allFragments.filter(fragment => fragment.tags.includes(tag)).length);
+      btn.appendChild(label);
+      btn.appendChild(count);
       btn.dataset.tag = tag;
       btn.classList.toggle("active", activeTags.has(tag));
       btn.title = "右クリックでタグ名を変更";
@@ -644,6 +724,7 @@
     });
     const geoGroup = document.querySelector("#tag-filters .geo-tag-group");
     if (geoGroup) geoGroup.hidden = ![...geoGroup.querySelectorAll(".tag-btn")].some(button => !button.hidden);
+    document.getElementById("tag-count").textContent = String([...document.querySelectorAll("#tag-filters .tag-btn")].filter(button => !button.hidden).length);
   }
 
   document.getElementById("tag-search").addEventListener("input", applyTagSearch);
@@ -1014,6 +1095,7 @@
 
   // --- カード描画 ---
   function render() {
+    updateSidebarCounts();
     renderSearchResults();
     const frags = filtered();
     updateTagButtonAvailability();
@@ -1024,9 +1106,7 @@
     count.textContent = `${frags.length} notes`;
     const tagClearBtn = document.getElementById("tag-clear-btn");
     const hasActiveTags = activeTags.size > 0;
-    tagClearBtn.classList.toggle("is-hidden", !hasActiveTags);
     tagClearBtn.disabled = !hasActiveTags;
-    tagClearBtn.setAttribute("aria-hidden", String(!hasActiveTags));
     document.getElementById("date-clear-btn").style.display = (dateFrom || dateTo) ? "" : "none";
 
     if (frags.length === 0) {
@@ -1123,6 +1203,8 @@
         picker.remove();
         if (scope !== scopeQuery().toString()) return;
         allFragments = allFragments.filter(fragment => fragment.id !== id);
+        const destination = folders.find(folder => folder.id === entry.id);
+        if (destination?.count != null) destination.count += 1;
         renderTagFilters([...new Set(allFragments.flatMap(fragment => fragment.tags))].sort());
         render();
       } catch (error) {
@@ -1752,19 +1834,25 @@
     load();
   }
 
-  document.getElementById("archive-link").addEventListener("click", () => {
-    if (composerBusy || folderBusy) return;
+  function selectArea(archive) {
+    if (composerBusy || folderBusy || archive === (currentSource === "archive")) return;
     rememberScrollPosition();
-    currentSource = "archive";
+    closeFolderForm();
+    currentSource = archive ? "archive" : "inbox";
     currentFolder = "";
     rememberFolderSelection();
     activeTags.clear();
+    document.getElementById("tag-search").value = "";
     ++loadVersion;
     allFragments = [];
+    fragmentsReady = false;
+    renderTagFilters([]);
     renderFolders();
     render();
     loadFolders();
-  });
+  }
+  document.getElementById("general-link").addEventListener("click", () => selectArea(false));
+  document.getElementById("archive-link").addEventListener("click", () => selectArea(true));
 
   try {
     const selection = readFolderSelection();

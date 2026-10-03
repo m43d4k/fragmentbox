@@ -131,6 +131,7 @@ def _source_dir(source: Source) -> Path:
 
 class Folder(BaseModel):
     name: str
+    count: int = 0
 
 
 class FolderCreate(BaseModel):
@@ -184,6 +185,15 @@ def _folder_names(source: Source) -> list[str]:
                   and p.resolve() not in reserved and not (source == "notes" and p.name == "notes"))
 
 
+def _markdown_count(directory: Path) -> int:
+    try:
+        entries = list(directory.iterdir())
+    except FileNotFoundError:
+        return 0
+    return sum(1 for path in entries
+               if path.suffix == ".md" and not path.is_symlink() and path.is_file())
+
+
 @app.get("/api/folders")
 def get_folders(source: Source = "notes") -> list[Folder]:
     names = _folder_names(source)
@@ -198,7 +208,9 @@ def get_folders(source: Source = "notes") -> list[Folder]:
         except (ValueError, OSError) as exc:
             raise HTTPException(500, "Cannot read folder order") from exc
     ordered = [n for n in order if n in names]
-    return [Folder(name=n) for n in ordered + [n for n in names if n not in ordered]]
+    root = _source_dir(source)
+    return [Folder(name=n, count=_markdown_count(root / n))
+            for n in ordered + [n for n in names if n not in ordered]]
 
 
 @app.post("/api/folders", status_code=201)
@@ -247,12 +259,15 @@ class NavigationFolder(BaseModel):
     name: str
     source: Source
     folder: str
+    count: int = 0
 
 
 @app.get("/api/navigation")
 def get_navigation() -> list[NavigationFolder]:
-    entries = [NavigationFolder(id="inbox:", name="inbox", source="inbox", folder="")]
-    entries += [NavigationFolder(id=f"notes:{f.name}", name=f.name, source="notes", folder=f.name)
+    entries = [NavigationFolder(id="inbox:", name="inbox", source="inbox", folder="",
+                                count=_markdown_count(INBOX_DIR))]
+    entries += [NavigationFolder(id=f"notes:{f.name}", name=f.name, source="notes", folder=f.name,
+                                 count=f.count)
                 for f in get_folders("notes")]
     path = ACTIVE_DIR / ".navigation-order.json"
     if not path.exists():

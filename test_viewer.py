@@ -169,6 +169,22 @@ class TestFolders(unittest.TestCase):
         (self.root / "追加").mkdir()
         self.assertEqual([f.name for f in viewer.get_folders()], ["音楽", "開発", "追加"])
 
+    def test_folder_counts_only_immediate_regular_markdown_files(self):
+        music = self.root / "音楽"
+        nested = music / "nested"
+        nested.mkdir(parents=True)
+        (music / "one.md").write_text("one")
+        (music / "two.md").write_text("two")
+        (music / "image.png").write_bytes(b"image")
+        (nested / "nested.md").write_text("nested")
+        outside = self.root / "outside.md"
+        outside.write_text("outside")
+        (music / "linked.md").symlink_to(outside)
+
+        folders = viewer.get_folders()
+
+        self.assertEqual([(folder.name, folder.count) for folder in folders], [("音楽", 2)])
+
     def test_invalid_names_and_duplicate(self):
         for name in ("", " ", "..", "../outside", "a/b", "a\\b", ".hidden"):
             with self.subTest(name=name), self.assertRaises(HTTPException):
@@ -330,6 +346,34 @@ class TestPosting(unittest.TestCase):
 
 
 class TestNavigation(unittest.TestCase):
+    def test_navigation_counts_inbox_and_folder_articles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            active, inbox, archive = root / "active", root / "active/inbox", root / "archive"
+            music = active / "Music"
+            archived_music = archive / "Music"
+            for directory in (inbox, music, archived_music):
+                directory.mkdir(parents=True)
+            (inbox / "inbox.md").write_text("inbox")
+            (inbox / "ignore.txt").write_text("text")
+            (music / "one.md").write_text("one")
+            (music / "two.md").write_text("two")
+            (archived_music / "archived.md").write_text("archived")
+            nested = music / "nested"
+            nested.mkdir()
+            (nested / "nested.md").write_text("nested")
+            outside = root / "outside.md"
+            outside.write_text("outside")
+            (music / "linked.md").symlink_to(outside)
+
+            with patch.multiple(viewer, ACTIVE_DIR=active, INBOX_DIR=inbox, ARCHIVE_DIR=archive,
+                                ASSETS_DIR=root / "assets"):
+                entries = viewer.get_navigation()
+                self.assertEqual([(entry.id, entry.count) for entry in entries],
+                                 [("inbox:", 1), ("notes:Music", 2)])
+                self.assertEqual([(folder.name, folder.count) for folder in viewer.get_folders("archive")],
+                                 [("Music", 1)])
+
     def test_inbox_is_orderable_alongside_normal_folders(self):
         with tempfile.TemporaryDirectory() as root, patch.object(viewer, "ACTIVE_DIR", Path(root)):
             (Path(root) / "音楽").mkdir()

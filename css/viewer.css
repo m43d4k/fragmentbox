@@ -139,15 +139,13 @@ header h1 {
 /* タグフィルター */
 #tag-section {
     margin-top: 26px;
-    padding-top: 16px;
-    border-top: 1px solid var(--line);
+    padding: 0 4px;
+    margin-bottom: 26px;
 }
 #tag-heading {
-    margin-bottom: 10px;
     color: #888a96;
     font-size: 10px;
     font-weight: 700;
-    padding: 0 8px;
     letter-spacing: .1em;
 }
 #tag-filters {
@@ -162,6 +160,10 @@ header h1 {
     margin-bottom: 8px;
 }
 #tag-filters .tag-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     width: 100%;
     min-width: 0;
     padding: 7px 9px;
@@ -169,6 +171,8 @@ header h1 {
     text-align: left;
     overflow-wrap: anywhere;
 }
+.tag-label { min-width: 0; overflow-wrap: anywhere; }
+.tag-count { flex: none; color: #686b77; font-size: 10px; }
 
 .tag-btn {
   background: transparent;
@@ -218,9 +222,8 @@ header h1 {
     border-color: transparent;
 }
 .tag-clear-btn:hover { color: #c6c7cf; }
-#tag-clear-btn.is-hidden {
-  visibility: hidden;
-}
+#tag-clear-btn { border: 1px solid #484052; padding: 6px 8px; background: #302b3b; color: #d7caf9; }
+#tag-clear-btn:disabled { opacity: .4; cursor: default; }
 
 /* カードリスト */
 #fragments {
@@ -612,6 +615,8 @@ a.url-title:hover { color: #dfd2ff; }
 
 /* フォルダ一覧 */
 #folder-pane {
+    display: flex;
+    flex-direction: column;
     background: #1c1e25;
     position: fixed;
     inset: 0 auto 0 0;
@@ -620,6 +625,38 @@ a.url-title:hover { color: #dfd2ff; }
     overflow-y: auto;
     border-right: 1px solid #15161b;
 }
+#folder-pane > * { flex-shrink: 0; }
+#sidebar-head { display: flex; align-items: center; gap: 11px; padding: 3px 8px 21px; }
+.brand-mark {
+    display: grid;
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    place-items: center;
+    border-radius: 12px;
+    background: linear-gradient(140deg, #b3a0ff, #7961cf);
+    color: #201b35;
+    font-size: 25px;
+    font-weight: 700;
+    box-shadow: 0 4px 16px #a78bfa22;
+}
+#sidebar-head h2 { margin-top: 1px; color: #f2f2f5; font-size: 15px; font-weight: 700; letter-spacing: -.02em; }
+.eyebrow { color: var(--subtle); font-size: 9px; font-weight: 700; letter-spacing: .12em; }
+#area-switch {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3px;
+    margin: 0 4px 26px;
+    padding: 4px;
+    border: 1px solid #30313a;
+    border-radius: 10px;
+    background: var(--bg);
+}
+#folder-section { padding: 0 4px; }
+.sidebar-section-heading { display: flex; align-items: center; gap: 8px; padding: 0 8px 8px; color: #888a96; }
+.sidebar-section-heading h2 { flex: 1; font-size: 10px; font-weight: 700; letter-spacing: .1em; }
+.section-count { color: #646773; font-size: 10px; }
+#sidebar-foot { margin-top: auto; padding: 14px 8px 0; border-top: 1px solid #ffffff0b; color: #666975; font-size: 10px; }
 main { margin-left: 264px; min-width: 0; }
 #folder-list, #archive-folders { display: flex; flex-direction: column; align-items: stretch; }
 #folder-pane :where(button:not(.tag-btn):not(.tag-mode-btn):not(.tag-clear-btn)) {
@@ -643,9 +680,14 @@ main { margin-left: 264px; min-width: 0; }
     background: #a78bfa1a;
     color: #e1d8ff;
 }
-#archive-link { width: 100%; }
+#folder-pane #area-switch button { text-align: center; padding: 9px 6px; min-height: 0; font-size: 12px; border-radius: 7px; color: var(--muted); }
+#folder-pane #area-switch button[aria-pressed="true"] { background: #34313f; color: #e9e1ff; box-shadow: 0 1px 3px #0004; }
+#folder-pane #folder-list button, #folder-pane #archive-folders button { display: flex; align-items: center; gap: 9px; width: 100%; }
+.folder-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.folder-count { flex: none; color: #71737e; font-size: 11px; }
+#folder-list[hidden], #archive-folders[hidden], #folder-pane #add-folder[hidden] { display: none; }
 #folder-pane button:disabled { opacity: 0.4; cursor: default; }
-#add-folder { width: 100%; }
+#folder-pane #add-folder { padding: 0; min-height: 20px; width: 20px; text-align: center; font-size: 17px; }
 #folder-name {
     width: 100%;
     padding: 6px;
@@ -658,6 +700,12 @@ main { margin-left: 264px; min-width: 0; }
 #status-message { padding: 10px 16px; color: var(--danger); }
 @media (max-width: 600px) {
     #folder-pane { width: 150px; padding: 8px; }
+    #sidebar-head { gap: 7px; padding-left: 0; padding-right: 0; }
+    .brand-mark { width: 28px; height: 28px; flex-basis: 28px; border-radius: 9px; font-size: 20px; }
+    #sidebar-head h2 { font-size: 12px; }
+    .eyebrow { font-size: 8px; }
+    #area-switch { margin-left: 0; margin-right: 0; }
+    #folder-pane #area-switch button { padding: 8px 3px; font-size: 11px; }
     main { margin-left: 150px; }
     #header-top { flex-wrap: wrap; gap: 8px; }
     #date-filter { flex-wrap: wrap; }
@@ -701,7 +749,6 @@ main { height: 100dvh; display: flex; flex-direction: column; }
 }
 #post-status { flex: 1; }
 
-#archive-section { margin-top: 24px; }
 #archive-folders { padding-left: 12px; }
 
 

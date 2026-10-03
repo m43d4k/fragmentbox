@@ -64,6 +64,7 @@ function renderArticles(dates, source = 'inbox') {
   const context = {
     filtered: () => dates.map((created_at, i) => ({ id: String(i), created_at, content: '', tags: [] })),
     renderSearchResults() {},
+    updateSidebarCounts() {},
     editDrafts: new Map(), expandedArticles: new Set(), scopeQuery: () => 'source=inbox',
     updateTagButtonAvailability() {}, activeTags: new Set(), dateFrom: '', dateTo: '', currentSource: source,
     document: { getElementById(id) {
@@ -627,6 +628,7 @@ test('geo tags form a final separate row and disappear when no search matches', 
   const search = { value: '' };
   const context = {
     activeTags: new Set(),
+    allFragments: [],
     document: {
       createElement: node,
       getElementById: id => id === 'tag-search' ? search : container,
@@ -842,4 +844,160 @@ test('expansion click updates the article, preserves full editing content, and s
   vm.runInContext('editDrafts.set(editKey(fragment.id), { content: fragment.content, busy: false }); result = renderArticleBody(fragment);', context);
   assert.match(context.result, /末尾/);
   assert.doesNotMatch(context.result, /article-expand-btn/);
+});
+
+function sidebarContext() {
+  const dom = new JSDOM(html);
+  const context = {
+    document: dom.window.document, updateComposer() {}, folderBusy: false, composerBusy: false,
+    currentSource: 'inbox', currentFolder: '', folders: [
+      { id: 'inbox:', name: 'inbox', source: 'inbox', folder: '', count: 2 },
+      { id: 'notes:音楽', name: '音楽', source: 'notes', folder: '音楽', count: 3 },
+    ], archiveFolders: [{ name: '音楽', count: 1 }], activeTags: new Set(),
+    allFragments: [{ tags: ['音楽', '音楽'] }, { tags: ['音楽', '制作'] }],
+    selectFolder() {}, moveFolder() {}, openFolderMenu() {}, openTagRename() {}, renderTagChange() {},
+  };
+  vm.createContext(context);
+  vm.runInContext(html.slice(html.indexOf('  function renderFolders('), html.indexOf('  function changeFolderState(')), context);
+  vm.runInContext(html.slice(html.indexOf('  function renderTagFilters('), html.indexOf('  document.getElementById("tag-search").addEventListener')), context);
+  return { dom, context, document: dom.window.document };
+}
+
+test('sidebar switches the visible folder list and preserves General folder management', () => {
+  const { dom, context, document } = sidebarContext();
+  context.renderFolders();
+  assert.equal(document.getElementById('general-link').getAttribute('aria-pressed'), 'true');
+  assert.equal(document.getElementById('archive-folders').hidden, true);
+  assert.equal(document.getElementById('folder-count').textContent, '2');
+  assert.deepEqual([...document.querySelectorAll('#folder-list .folder-count')].map(el => el.textContent), ['2', '3']);
+  assert.equal(document.querySelector('#folder-list .folder-name').draggable, true);
+  context.currentSource = 'archive';
+  context.currentFolder = '音楽';
+  context.renderFolders();
+  assert.equal(document.getElementById('archive-link').getAttribute('aria-pressed'), 'true');
+  assert.equal(document.getElementById('folder-list').hidden, true);
+  assert.equal(document.getElementById('archive-folders').hidden, false);
+  assert.equal(document.getElementById('folder-count').textContent, '1');
+  assert.equal(document.querySelector('#archive-folders .folder-count').textContent, '1');
+  assert.equal(document.getElementById('add-folder').hidden, true);
+  dom.window.close();
+});
+
+test('sidebar tag counts count articles once and tag search updates the visible tag total', () => {
+  const { dom, context, document } = sidebarContext();
+  context.renderTagFilters(['制作', '音楽']);
+  assert.deepEqual([...document.querySelectorAll('.tag-count')].map(el => el.textContent), ['1', '2']);
+  assert.equal(document.getElementById('tag-count').textContent, '2');
+  document.getElementById('tag-search').value = '制作';
+  context.applyTagSearch();
+  assert.equal(document.getElementById('tag-count').textContent, '1');
+  context.activeTags.add('音楽');
+  context.applyTagSearch();
+  assert.equal(document.getElementById('tag-count').textContent, '2');
+  dom.window.close();
+});
+
+test('area switch selects Inbox or Archive, clears tag filters, and is blocked during saving', () => {
+  const { dom, context, document } = sidebarContext();
+  const loads = [];
+  Object.assign(context, {
+    fragmentsReady: true, loadVersion: 0, rememberScrollPosition() {}, closeFolderForm() {},
+    rememberFolderSelection() {}, render() {}, loadFolders() { loads.push(this.currentSource); },
+  });
+  vm.runInContext(html.slice(html.indexOf('  function selectArea('), html.indexOf('  document.getElementById("general-link").addEventListener')), context);
+  context.currentSource = 'notes';
+  context.currentFolder = '音楽';
+  context.activeTags.add('音楽');
+  document.getElementById('tag-search').value = '音';
+  context.selectArea(true);
+  assert.equal(context.currentSource, 'archive');
+  assert.equal(context.currentFolder, '');
+  assert.equal(context.activeTags.size, 0);
+  assert.equal(document.getElementById('tag-search').value, '');
+  assert.equal(context.fragmentsReady, false);
+  assert.equal(loads.length, 1);
+  context.composerBusy = true;
+  context.selectArea(false);
+  assert.equal(context.currentSource, 'archive');
+  assert.equal(loads.length, 1);
+  context.composerBusy = false;
+  context.selectArea(false);
+  assert.equal(context.currentSource, 'inbox');
+  assert.equal(context.currentFolder, '');
+  assert.equal(loads.length, 2);
+  dom.window.close();
+});
+
+test('Archive initially selects its first folder while an existing selection is retained', async () => {
+  for (const selection of ['', '制作']) {
+    const loads = [];
+    const context = {
+      currentSource: 'archive', currentFolder: selection, folders: [], archiveFolders: [], renderFolders() {}, rememberFolderSelection() {},
+      async request(url) { return url === '/api/navigation' ? [] : [{ name: '音楽', count: 3 }, { name: '制作', count: 1 }]; },
+      async load() { loads.push(context.currentFolder); }, showError(error) { throw error; },
+    };
+    vm.createContext(context);
+    vm.runInContext(html.slice(html.indexOf('  async function loadFolders('), html.indexOf('  document.getElementById("add-folder").addEventListener')), context);
+    await context.loadFolders();
+    assert.deepEqual(loads, [selection || '音楽']);
+  }
+});
+
+test('sidebar counts follow loaded articles and edits without resetting counts while loading', () => {
+  const { dom, context, document } = sidebarContext();
+  context.fragmentsReady = true;
+  context.renderFolders();
+  context.renderTagFilters(['制作', '音楽']);
+  context.allFragments = [{ tags: ['制作', 'favorite'] }];
+  context.updateSidebarCounts();
+  assert.equal(document.querySelector('#folder-list .folder-count').textContent, '1');
+  assert.equal(document.querySelector('[data-tag="favorite"] .tag-count').textContent, '1');
+  assert.equal(document.querySelector('[data-tag="音楽"]'), null);
+  assert.equal(document.getElementById('tag-count').textContent, '2');
+  context.fragmentsReady = false;
+  context.allFragments = [];
+  context.updateSidebarCounts();
+  assert.equal(document.querySelector('#folder-list .folder-count').textContent, '1');
+  dom.window.close();
+});
+
+test('unknown folder counts stay distinct from real zero before and after sidebar updates', () => {
+  const { dom, context, document } = sidebarContext();
+  context.folders[0].count = 0;
+  delete context.folders[1].count;
+  context.archiveFolders[0].count = null;
+  context.allFragments = [];
+  context.fragmentsReady = true;
+  for (const source of ['inbox', 'archive']) {
+    context.currentSource = source;
+    context.renderFolders();
+    const counts = () => [...document.querySelectorAll('.folder-count')].map(el => el.textContent);
+    assert.deepEqual(counts(), source === 'inbox' ? ['0', '—'] : ['0', '—', '—']);
+    context.updateSidebarCounts();
+    assert.deepEqual(counts(), source === 'inbox' ? ['0', '—'] : ['0', '—', '—']);
+  }
+  dom.window.close();
+});
+
+
+test('navigation refresh retains known counts when an older API omits them and reports the mismatch', async () => {
+  const errors = [];
+  const context = {
+    currentSource: 'inbox', currentFolder: '', folders: [
+      { id: 'inbox:', count: 12 }, { id: 'notes:music', count: 4 },
+    ], archiveFolders: [{ name: 'music', count: 7 }], renderFolders() {},
+    async request() { return [{ id: 'notes:music' }, { id: 'inbox:' }, { id: 'notes:new' }]; },
+    async load() {}, showError(error) { errors.push(error.message); },
+  };
+  vm.createContext(context);
+  vm.runInContext(html.slice(html.indexOf('  async function loadFolders('), html.indexOf('  document.getElementById("add-folder").addEventListener')), context);
+  await context.loadFolders();
+  assert.deepEqual(Array.from(context.folders, folder => folder.count), [4, 12, undefined]);
+  assert.equal(context.archiveFolders[0].count, 7);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /再起動/);
+  context.request = async () => [{ id: 'notes:music', count: 0 }, { id: 'inbox:', count: 15 }];
+  await context.loadFolders();
+  assert.deepEqual(Array.from(context.folders, folder => folder.count), [0, 15]);
+  assert.equal(errors.length, 1);
 });
