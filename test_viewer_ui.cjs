@@ -63,6 +63,7 @@ function renderArticles(dates, source = 'inbox') {
   const elements = new Map();
   const context = {
     filtered: () => dates.map((created_at, i) => ({ id: String(i), created_at, content: '', tags: [] })),
+    renderSearchResults() {},
     editDrafts: new Map(), expandedArticles: new Set(), scopeQuery: () => 'source=inbox',
     updateTagButtonAvailability() {}, activeTags: new Set(), dateFrom: '', dateTo: '', currentSource: source,
     document: { getElementById(id) {
@@ -93,11 +94,190 @@ test('articles display oldest first without changing source data', () => {
     { id: 'old', created_at: '2026-09-21T12:00:00' },
     { id: 'middle', created_at: '2026-09-22T10:00:00' },
   ];
-  const code = html.slice(html.indexOf('  function filtered()'), html.indexOf('  function updateTagButtonAvailability()'));
-  const context = { allFragments, matchesFilters: () => true };
+  const code = html.slice(html.indexOf('  function filtered('), html.indexOf('  function updateTagButtonAvailability()'));
+  const context = { allFragments, matchesFilters: () => true, activeTags: new Set() };
   vm.runInNewContext(`${code}\nresult = filtered();`, context);
   assert.deepEqual(Array.from(context.result, f => f.id), ['old', 'middle', 'new']);
   assert.deepEqual(allFragments.map(f => f.id), ['new', 'old', 'middle']);
+});
+
+const filtering = html.slice(html.indexOf('  function matchesFilters('), html.indexOf('  function updateTagButtonAvailability()'));
+function filterArticles(fragments, { activeTags = new Set(), searchQuery = '', dateFrom = '', dateTo = '', showFavoritesOnly = false, tagMode = 'AND' } = {}, expression = 'filtered()') {
+  const context = { allFragments: fragments, activeTags, searchQuery, dateFrom, dateTo, showFavoritesOnly, tagMode };
+  vm.runInNewContext(`${filtering}\nresult = ${expression};`, context);
+  return context.result;
+}
+
+test('search and date filters apply only when filtering search results', () => {
+  const fragments = [
+    { id: 'match', content: 'needle', created_at: '2026-09-22T12:00:00', tags: [] },
+    { id: 'query-miss', content: 'haystack', created_at: '2026-09-22T12:00:00', tags: [] },
+    { id: 'date-miss', content: 'needle', created_at: '2026-09-21T12:00:00', tags: [] },
+  ];
+  const filters = { searchQuery: 'needle', dateFrom: '2026-09-22', dateTo: '2026-09-22' };
+  assert.deepEqual(filterArticles(fragments, filters).map(f => f.id), ['date-miss', 'match', 'query-miss']);
+  assert.deepEqual(filterArticles(fragments, filters, 'filtered(true)').map(f => f.id), ['match']);
+});
+
+test('search filtering still shares selected tags and favorite-only state', () => {
+  const fragments = [
+    { id: 'tagged-favorite', content: 'needle', created_at: '2026-09-22T12:00:00', tags: ['music', 'favorite'] },
+    { id: 'tagged', content: 'needle', created_at: '2026-09-22T12:00:00', tags: ['music'] },
+    { id: 'other-tag', content: 'needle', created_at: '2026-09-22T12:00:00', tags: ['movie', 'favorite'] },
+  ];
+  const filters = { activeTags: new Set(['music']), searchQuery: 'needle', showFavoritesOnly: true };
+  assert.deepEqual(filterArticles(fragments, filters, 'filtered(true)').map(f => f.id), ['tagged-favorite']);
+  assert.equal(filterArticles(fragments, filters, 'matchesFilters(allFragments[0], new Set(["music", "missing"]), true)'), false);
+});
+
+test('search query and dates do not disable sidebar tag candidates', () => {
+  const fragments = [
+    { id: 'candidate', content: 'unrelated', created_at: '2026-09-21T12:00:00', tags: ['music'] },
+    { id: 'search-match', content: 'needle', created_at: '2026-09-22T12:00:00', tags: [] },
+  ];
+  const button = { dataset: { tag: 'music' }, disabled: false, title: '' };
+  const context = {
+    allFragments: fragments, activeTags: new Set(), searchQuery: 'needle',
+    dateFrom: '2026-09-22', dateTo: '2026-09-22', showFavoritesOnly: false, tagMode: 'AND',
+    document: { querySelectorAll: () => [button] },
+  };
+  const availability = html.slice(html.indexOf('  function updateTagButtonAvailability()'), html.indexOf('  // --- コンテンツ描画 ---'));
+  vm.runInNewContext(`${filtering}\n${availability}\nupdateTagButtonAvailability();`, context);
+  assert.equal(button.disabled, false);
+  assert.equal(button.title, '');
+});
+
+test('end date includes fractional seconds through the last second', () => {
+  const fragments = [
+    { id: 'last-whole-second', content: '', created_at: '2026-09-22T23:59:59', tags: [] },
+    { id: 'fractional', content: '', created_at: '2026-09-22T23:59:59.999999', tags: [] },
+    { id: 'next-day', content: '', created_at: '2026-09-23T00:00:00', tags: [] },
+  ];
+  assert.deepEqual(filterArticles(fragments, { dateTo: '2026-09-22' }, 'filtered(true)').map(f => f.id), ['last-whole-second', 'fractional']);
+});
+
+function searchPanelContext(mobile = false) {
+  const dom = new JSDOM(html);
+  const { document } = dom.window;
+  const mainCard = document.createElement('article');
+  mainCard.className = 'card';
+  mainCard.dataset.id = 'main-card';
+  document.getElementById('cards').append(mainCard);
+  const fragments = [
+    { id: 'needle-old', content: 'needle older', created_at: '2026-09-21T12:00:00', tags: [] },
+    { id: 'needle-new', content: 'needle newer', created_at: '2026-09-22T12:00:00', tags: [] },
+    { id: 'other-new', content: 'other', created_at: '2026-09-22T13:00:00', tags: [] },
+  ];
+  const media = { matches: mobile, addEventListener() {} };
+  const context = {
+    document,
+    window: { matchMedia: () => media },
+    allFragments: fragments, activeTags: new Set(), searchQuery: '', dateFrom: '', dateTo: '',
+    showFavoritesOnly: false, tagMode: 'AND', currentFolder: '', currentSource: 'inbox',
+    searchExpandedArticles: new Set(), displayedScrollKey: 'inbox', restoringScroll: null,
+    viewerScroll: document.getElementById('viewer-scroll'), lightbox: document.getElementById('lightbox'),
+    visibleArticleTop: () => 0, applyScrollPosition() {},
+    escapeHtml: value => String(value), formatDatetime: value => value,
+    renderArticleBody: fragment => fragment.content,
+  };
+  const filteringCode = html.slice(html.indexOf('  function matchesFilters('), html.indexOf('  function updateTagButtonAvailability()'));
+  const panelCode = html.slice(html.indexOf('  // --- 右カラムの検索 ---'), html.indexOf('  document.getElementById("tag-clear-btn").addEventListener("click"'));
+  const showErrorCode = html.slice(html.indexOf('  function showError('), html.indexOf('  async function request('));
+  vm.createContext(context);
+  vm.runInContext(`${showErrorCode}\n${filteringCode}\n${panelCode}`, context);
+  return { dom, context, mainCard, media };
+}
+
+test('search panel keeps the main feed and scroll intact, scopes dates, and restores focus on close', () => {
+  const { dom, context, mainCard } = searchPanelContext();
+  const { document } = dom.window;
+  const scroll = document.getElementById('viewer-scroll');
+  scroll.scrollTop = 321;
+  const toggle = document.getElementById('search-toggle');
+  toggle.click();
+  assert.equal(document.getElementById('search-panel').hidden, false);
+  assert.equal(document.activeElement.id, 'search');
+
+  const search = document.getElementById('search');
+  search.value = 'needle';
+  search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  const dateFrom = document.getElementById('date-from');
+  dateFrom.value = '2026-09-22';
+  dateFrom.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  const dateTo = document.getElementById('date-to');
+  dateTo.value = '2026-09-22';
+  dateTo.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+
+  assert.equal(context.dateTo, '2026-09-22');
+  assert.deepEqual(Array.from(context.filtered(true), fragment => fragment.id), ['needle-new']);
+  assert.deepEqual([...document.querySelectorAll('#search-cards .card')].map(card => card.dataset.id), ['needle-new']);
+  assert.equal(document.querySelector('#cards .card'), mainCard);
+  assert.equal(scroll.scrollTop, 321);
+  assert.equal(context.searchQuery, 'needle');
+  context.showError(new Error('検索に失敗しました'));
+  assert.equal(document.getElementById('search-status').hidden, false);
+  assert.equal(document.getElementById('search-status').textContent, '検索に失敗しました');
+
+  document.getElementById('search-close').click();
+  assert.equal(document.getElementById('search-panel').hidden, true);
+  assert.equal(document.activeElement, toggle);
+  assert.equal(search.value, '');
+  assert.equal(dateFrom.value, '');
+  assert.equal(dateTo.value, '');
+  assert.equal(document.getElementById('search-cards').children.length, 0);
+  assert.equal(context.searchQuery, '');
+  assert.equal(context.dateTo, '');
+  assert.equal(document.getElementById('search-status').hidden, true);
+  assert.equal(document.querySelector('#cards .card'), mainCard);
+  assert.equal(scroll.scrollTop, 321);
+  dom.window.close();
+});
+
+test('mobile search makes the main feed and folder sidebar inert until closed', () => {
+  const { dom } = searchPanelContext(true);
+  const { document } = dom.window;
+  document.getElementById('search-toggle').click();
+  assert.equal(document.querySelector('main').inert, true);
+  assert.equal(document.getElementById('folder-pane').inert, true);
+  document.getElementById('search-back').click();
+  assert.equal(document.querySelector('main').inert, false);
+  assert.equal(document.getElementById('folder-pane').inert, false);
+  dom.window.close();
+});
+
+test('expanding a search result uses separate expansion state and leaves the main scroll alone', () => {
+  const fragment = { id: 'long-search', content: '😀'.repeat(2000) + '末尾', tag_lines: [] };
+  const dom = new JSDOM('<div id="cards"><div class="card"><div class="card-body"></div></div></div><div id="search-cards"><div class="card"><div class="card-body"></div></div></div>');
+  const { document } = dom.window;
+  const mainCard = document.querySelector('#cards .card');
+  const searchCard = document.querySelector('#search-cards .card');
+  const viewerScroll = { scrollTop: 321 };
+  document.getElementById('search-scroll')?.remove();
+  const searchScrollElement = document.createElement('div');
+  searchScrollElement.id = 'search-scroll';
+  searchScrollElement.getBoundingClientRect = () => ({ top: 0 });
+  document.body.append(searchScrollElement);
+  const context = {
+    document, fragment, allFragments: [fragment], editDrafts: new Map(),
+    expandedArticles: new Set(), searchExpandedArticles: new Set(), scopeQuery: () => 'inbox',
+    viewerScroll, visibleArticleTop: () => 80, restoringScroll: null, crypto, marked, DOMPurify,
+    mainCard, searchCard,
+  };
+  vm.createContext(context);
+  vm.runInContext(`${rendering}\nmainCard.querySelector('.card-body').innerHTML = renderArticleBody(fragment); searchCard.querySelector('.card-body').innerHTML = renderArticleBody(fragment, true); toggleArticleExpansion(searchCard.querySelector('button'));`, context);
+  assert.equal(searchCard.querySelector('button').getAttribute('aria-expanded'), 'true');
+  assert.equal(context.searchExpandedArticles.has(JSON.stringify(['inbox', 'long-search'])), true);
+  assert.equal(context.expandedArticles.size, 0);
+  assert.equal(viewerScroll.scrollTop, 321);
+  assert.doesNotMatch(mainCard.querySelector('.card-body').innerHTML, /末尾/);
+  dom.window.close();
+});
+
+test('inline viewer script parses', () => {
+  const start = html.indexOf('<script>', html.indexOf('</aside>')) + '<script>'.length;
+  const end = html.indexOf('</script>', start);
+  assert.ok(start >= '<script>'.length && end > start);
+  assert.doesNotThrow(() => new vm.Script(html.slice(start, end)));
 });
 
 test('folder scroll positions restore independently and new folders start at bottom', () => {
@@ -497,8 +677,8 @@ test('missing attachments show a warning without an open link', () => {
 });
 
 test('filename click requests local application opening without navigation', async () => {
-  const start = html.indexOf('  document.getElementById("cards").addEventListener("click", async e => {');
-  const end = html.indexOf('\n    if (e.target.', start);
+  const start = html.indexOf('  async function handleArticleClick(e) {');
+  const end = html.indexOf('\n  document.getElementById("cards").addEventListener', start);
   const calls = [];
   const attributes = new Map();
   const link = {
@@ -509,12 +689,11 @@ test('filename click requests local application opening without navigation', asy
   };
   let prevented = false;
   const context = {
-    document: { getElementById: () => ({ addEventListener: (_, handler) => { context.handler = handler; } }) },
     request: async (...args) => { calls.push(args); },
     showError: error => { throw error; },
   };
-  vm.runInNewContext(html.slice(start, end) + '\n});', context);
-  await context.handler({ target: { closest: selector => selector === ".attachment-open" ? link : null }, preventDefault() { prevented = true; } });
+  vm.runInNewContext(html.slice(start, end), context);
+  await context.handleArticleClick({ target: { closest: selector => selector === ".attachment-open" ? link : null }, preventDefault() { prevented = true; } });
   assert.equal(prevented, true);
   assert.equal(calls[0][1].method, 'POST');
   assert.equal(calls[0][1].headers['X-Fragmentbox-Open'], '1');

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>fragmentbox</title>
-  <link rel="stylesheet" href="/css/viewer.css?v=article-collapse">
+  <link rel="stylesheet" href="/css/viewer.css?v=search-panel">
 </head>
 <body>
 
@@ -39,14 +39,8 @@
     <h1>fragmentbox</h1>
     <div id="header-right">
       <button id="fav-filter-btn" class="fav-filter-btn" title="Show favorites only">♥</button>
+      <button id="search-toggle" type="button" aria-label="記事を検索" title="記事を検索" aria-expanded="false" aria-controls="search-panel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg></button>
     </div>
-  </div>
-  <input id="search" type="text" placeholder="Search..." autocomplete="off">
-  <div id="date-filter">
-    <input id="date-from" type="date" title="From">
-    <span>–</span>
-    <input id="date-to" type="date" title="To">
-    <button id="date-clear-btn" class="tag-clear-btn" style="display:none">✕</button>
   </div>
 </header>
 
@@ -72,6 +66,29 @@
 </form>
 </main>
 
+<aside id="search-panel" aria-labelledby="search-heading" hidden>
+  <div id="search-panel-heading">
+    <button id="search-back" type="button" aria-label="検索を閉じて戻る">←</button>
+    <h2 id="search-heading">記事を検索</h2>
+    <button id="search-close" type="button" aria-label="検索を閉じる">×</button>
+  </div>
+  <div id="search-controls">
+    <input id="search" type="search" placeholder="記事を検索…" aria-label="記事を検索" autocomplete="off">
+    <div id="date-filter" role="group" aria-label="記事の期間">
+      <input id="date-from" type="date" title="開始日" aria-label="開始日">
+      <span aria-hidden="true">–</span>
+      <input id="date-to" type="date" title="終了日" aria-label="終了日">
+      <button id="date-clear-btn" type="button" class="tag-clear-btn" aria-label="期間を解除" style="display:none">✕</button>
+    </div>
+  </div>
+  <div id="search-scroll">
+    <div id="search-status" role="alert" hidden></div>
+    <div id="search-count" role="status" aria-live="polite"></div>
+    <div id="search-cards"></div>
+    <p id="search-empty">検索する言葉や期間を指定してください。</p>
+  </div>
+</aside>
+
 <div id="lightbox" style="display:none">
   <img id="lightbox-img" src="" alt="">
 </div>
@@ -92,6 +109,7 @@
   let allFragments = [];
   const editDrafts = new Map();
   const expandedArticles = new Set();
+  const searchExpandedArticles = new Set();
   let activeTags = new Set();
   let searchQuery = "";
   let tagMode = "AND"; // "AND" | "OR"
@@ -263,6 +281,11 @@
     const el = document.getElementById("status-message");
     el.textContent = error.message;
     el.hidden = false;
+    if (!document.getElementById("search-panel").hidden) {
+      const searchStatus = document.getElementById("search-status");
+      searchStatus.textContent = error.message;
+      searchStatus.hidden = false;
+    }
   }
 
   async function request(url, options) {
@@ -530,6 +553,8 @@
   // --- データ取得 ---
   async function load() {
     expandedArticles.clear();
+    searchExpandedArticles.clear();
+    document.getElementById("search-scroll").scrollTop = 0;
     closeTagSuggestions();
     rememberScrollPosition();
     const version = ++loadVersion;
@@ -684,7 +709,7 @@
   }
 
   // --- フィルタリング ---
-  function matchesFilters(f, tags = activeTags) {
+  function matchesFilters(f, tags = activeTags, includeSearch = false) {
     if (showFavoritesOnly && !f.tags.includes("favorite")) return false;
     if (tags.size > 0) {
       if (tagMode === "AND") {
@@ -693,17 +718,17 @@
         if (![...tags].some(t => f.tags.includes(t))) return false;
       }
     }
-    if (searchQuery) {
+    if (includeSearch && searchQuery) {
       const q = searchQuery.toLowerCase();
       if (!f.content.toLowerCase().includes(q)) return false;
     }
-    if (dateFrom && f.created_at < dateFrom) return false;
-    if (dateTo   && f.created_at > dateTo + "T23:59:59") return false;
+    if (includeSearch && dateFrom && f.created_at.slice(0, 10) < dateFrom) return false;
+    if (includeSearch && dateTo && f.created_at.slice(0, 10) > dateTo) return false;
     return true;
   }
 
-  function filtered() {
-    return allFragments.filter(f => matchesFilters(f))
+  function filtered(includeSearch = false) {
+    return allFragments.filter(f => matchesFilters(f, undefined, includeSearch))
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   }
 
@@ -932,12 +957,12 @@
     return result;
   }
 
-  function renderArticleBody(fragment) {
-    const draft = editDrafts.get(editKey(fragment.id));
+  function renderArticleBody(fragment, searchResult = false) {
+    const draft = searchResult ? null : editDrafts.get(editKey(fragment.id));
     if (!draft) {
       const characters = Array.from(fragment.content);
       const long = characters.length > 2000;
-      const expanded = long && expandedArticles.has(editKey(fragment.id));
+      const expanded = long && (searchResult ? searchExpandedArticles : expandedArticles).has(editKey(fragment.id));
       const content = long && !expanded ? characters.slice(0, 2000).join("") : fragment.content;
       const lines = content.split("\n");
       const tagLines = (fragment.tag_lines || []).filter(number =>
@@ -962,17 +987,21 @@
 
   function toggleArticleExpansion(button) {
     const fragment = allFragments.find(item => item.id === button.dataset.id);
-    if (!fragment || editDrafts.has(editKey(fragment.id))) return;
+    const searchResult = !!button.closest("#search-cards");
+    if (!fragment || (!searchResult && editDrafts.has(editKey(fragment.id)))) return;
     const key = editKey(fragment.id);
-    const collapsing = expandedArticles.has(key);
-    if (collapsing) expandedArticles.delete(key);
-    else expandedArticles.add(key);
+    const expanded = searchResult ? searchExpandedArticles : expandedArticles;
+    const collapsing = expanded.has(key);
+    if (collapsing) expanded.delete(key);
+    else expanded.add(key);
     const card = button.closest(".card");
-    restoringScroll = null;
-    card.querySelector(".card-body").innerHTML = renderArticleBody(fragment);
+    if (!searchResult) restoringScroll = null;
+    card.querySelector(".card-body").innerHTML = renderArticleBody(fragment, searchResult);
     if (collapsing) {
-      const offset = card.getBoundingClientRect().top - visibleArticleTop();
-      if (offset < 0) viewerScroll.scrollTop += offset;
+      const scroll = searchResult ? document.getElementById("search-scroll") : viewerScroll;
+      const top = searchResult ? scroll.getBoundingClientRect().top : visibleArticleTop();
+      const offset = card.getBoundingClientRect().top - top;
+      if (offset < 0) scroll.scrollTop += offset;
     }
     card.querySelector(".article-expand-btn")?.focus({ preventScroll: true });
   }
@@ -985,6 +1014,7 @@
 
   // --- カード描画 ---
   function render() {
+    renderSearchResults();
     const frags = filtered();
     updateTagButtonAvailability();
     const cards = document.getElementById("cards");
@@ -1456,7 +1486,7 @@
     if (e.key === "Escape" && lightbox.style.display !== "none") closeLightbox();
   });
 
-  document.getElementById("cards").addEventListener("click", async e => {
+  async function handleArticleClick(e) {
     const expandButton = e.target.closest(".article-expand-btn");
     if (expandButton) {
       toggleArticleExpansion(expandButton);
@@ -1602,20 +1632,94 @@
     const btn = document.querySelector(`.tag-btn[data-tag="${tag}"]`);
     if (btn) btn.classList.add("active");
     renderTagChange();
-  });
+  }
+  document.getElementById("cards").addEventListener("click", handleArticleClick);
+  document.getElementById("search-cards").addEventListener("click", handleArticleClick);
 
+  // --- 右カラムの検索 ---
+  function renderSearchResults() {
+    if (document.getElementById("search-panel").hidden) return;
+    document.getElementById("search-heading").textContent = `検索: ${currentFolder || (currentSource === "archive" ? "Archive" : "Inbox")}`;
+    const hasQuery = !!(searchQuery || dateFrom || dateTo);
+    const results = hasQuery ? filtered(true) : [];
+    document.getElementById("search-count").textContent = hasQuery ? `${results.length} notes` : "";
+    const empty = document.getElementById("search-empty");
+    empty.hidden = results.length > 0;
+    empty.textContent = hasQuery ? "一致する記事はありません。" : "検索する言葉や期間を指定してください。";
+    document.getElementById("date-clear-btn").style.display = (dateFrom || dateTo) ? "" : "none";
+    document.getElementById("search-cards").innerHTML = results.map(fragment => `
+      <div class="card" data-id="${escapeHtml(fragment.id)}">
+        <div class="card-datetime">${formatDatetime(fragment.created_at)}</div>
+        <div class="card-body">${renderArticleBody(fragment, true)}</div>
+      </div>
+    `).join("");
+  }
+
+  let searchReadingPosition = null;
+  function setSearchOpen(open) {
+    const panel = document.getElementById("search-panel");
+    if (open === !panel.hidden) return;
+    if (open || !searchMobile.matches) {
+      const top = visibleArticleTop();
+      const card = [...document.querySelectorAll("#cards > .card")].find(card => card.getBoundingClientRect().bottom > top);
+      searchReadingPosition = { key: displayedScrollKey, position: viewerScroll.scrollTop,
+        anchor: card ? { id: card.dataset.id, offset: card.getBoundingClientRect().top - top } : null };
+    }
+    panel.hidden = !open;
+    document.body.classList.toggle("search-open", open);
+    document.getElementById("search-toggle").setAttribute("aria-expanded", String(open));
+    syncSearchAccessibility();
+    if (open) {
+      restoringScroll = searchReadingPosition;
+      applyScrollPosition();
+      renderSearchResults();
+      document.getElementById("search").focus();
+    } else {
+      searchQuery = dateFrom = dateTo = "";
+      for (const id of ["search", "date-from", "date-to"]) document.getElementById(id).value = "";
+      searchExpandedArticles.clear();
+      document.getElementById("search-status").hidden = true;
+      document.getElementById("search-cards").replaceChildren();
+      document.getElementById("search-scroll").scrollTop = 0;
+      // モバイルは開く直前、PCは閉じる直前の記事位置へ戻す。
+      restoringScroll = searchReadingPosition;
+      applyScrollPosition();
+      document.getElementById("search-toggle").focus({ preventScroll: true });
+    }
+  }
+
+  const searchMobile = window.matchMedia("(max-width: 760px)");
+  function syncSearchAccessibility() {
+    const covered = searchMobile.matches && !document.getElementById("search-panel").hidden;
+    document.querySelector("main").inert = covered;
+    document.getElementById("folder-pane").inert = covered;
+  }
+  searchMobile.addEventListener("change", syncSearchAccessibility);
+  document.getElementById("search-toggle").addEventListener("click", () => setSearchOpen(document.getElementById("search-panel").hidden));
+  for (const id of ["search-close", "search-back"]) document.getElementById(id).addEventListener("click", () => setSearchOpen(false));
+  document.getElementById("search-panel").addEventListener("keydown", event => {
+    if (event.key === "Escape" && !event.isComposing && lightbox.style.display === "none") {
+      event.preventDefault();
+      setSearchOpen(false);
+    }
+  });
+  function updateSearchResults() {
+    searchExpandedArticles.clear();
+    document.getElementById("search-scroll").scrollTop = 0;
+    renderSearchResults();
+  }
   document.getElementById("search").addEventListener("input", e => {
     searchQuery = e.target.value.trim();
-    render();
+    updateSearchResults();
   });
 
-  document.getElementById("date-from").addEventListener("change", e => { dateFrom = e.target.value; render(); });
-  document.getElementById("date-to").addEventListener("change",   e => { dateTo   = e.target.value; render(); });
+  document.getElementById("date-from").addEventListener("change", e => { dateFrom = e.target.value; updateSearchResults(); });
+  document.getElementById("date-to").addEventListener("change",   e => { dateTo   = e.target.value; updateSearchResults(); });
   document.getElementById("date-clear-btn").addEventListener("click", () => {
     dateFrom = dateTo = "";
     document.getElementById("date-from").value = "";
     document.getElementById("date-to").value = "";
-    render();
+    updateSearchResults();
   });
 
   document.getElementById("tag-clear-btn").addEventListener("click", () => {

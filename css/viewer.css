@@ -40,8 +40,58 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
 }
+
+/* 独立した検索カラム */
+#search-toggle, #search-close, #search-back {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 32px;
+    height: 30px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+}
+#search-toggle[aria-expanded="true"] {
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+#search-panel {
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: clamp(320px, 35vw, 460px);
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border-left: 1px solid var(--line);
+}
+#search-panel[hidden], #search-back { display: none; }
+body.search-open main { margin-right: clamp(320px, 35vw, 460px); }
+#search-panel-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 57px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+}
+#search-heading {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 13px;
+}
+#search-controls { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+#search-panel #date-filter { gap: 5px; flex-wrap: wrap; }
+#search-panel #date-filter input { min-width: 0; flex: 1; width: 110px; padding: 6px; }
+#search-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; padding: 12px 16px; }
+#search-count { color: var(--muted); font-size: 11px; }
+#search-status { padding: 8px 0; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+#search-empty { margin: 40px 0; color: var(--muted); font-size: 12px; text-align: center; }
 
 header h1 {
   font-size: 15px;
@@ -947,10 +997,32 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 }
 #folder-pane button:not(:disabled):hover { background: #ffffff0a; color: #e3d9ff; }
 #folder-pane button[aria-current="true"]:hover { background: #a78bfa1a; color: #e1d8ff; }
-#viewer-scroll, #folder-pane, #composer {
+#viewer-scroll, #folder-pane, #composer, #search-scroll {
     scrollbar-color: #393b45 transparent;
     scrollbar-width: thin;
     overscroll-behavior: contain;
+}
+
+@media (min-width: 761px) and (max-width: 1100px) {
+    body.search-open #folder-pane { width: 200px; }
+    body.search-open main { margin-left: 200px; }
+    body.search-open header { padding-left: 16px; padding-right: 16px; }
+    body.search-open #fragments { padding-left: 16px; padding-right: 16px; }
+    body.search-open #composer { padding-left: 16px; padding-right: 16px; }
+}
+@media (max-width: 760px) {
+    body.search-open main { margin-right: 0; }
+    body.search-open main, body.search-open #folder-pane { visibility: hidden; }
+    #search-panel {
+        inset: 0;
+        width: 100%;
+        z-index: 200;
+        border: 0;
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+    #search-close { display: none; }
+    #search-back { display: inline-flex; }
+    #search { font-size: 16px; }
 }
 #composer button { border-radius: 6px; font-size: 11px; }
 #composer button:not(:disabled):hover { background: #ffffff0a; color: #e3d9ff; }
