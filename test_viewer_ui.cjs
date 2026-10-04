@@ -64,6 +64,7 @@ function renderArticles(dates, source = 'inbox') {
   const context = {
     filtered: () => dates.map((created_at, i) => ({ id: String(i), created_at, content: '', tags: [] })),
     renderSearchResults() {},
+    renderActiveFilters() {},
     updateSidebarCounts() {},
     editDrafts: new Map(), expandedArticles: new Set(), scopeQuery: () => 'source=inbox',
     updateTagButtonAvailability() {}, activeTags: new Set(), dateFrom: '', dateTo: '', currentSource: source,

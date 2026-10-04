@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>fragmentbox</title>
-  <link rel="stylesheet" href="/css/viewer.css?v=channel-header">
+  <link rel="stylesheet" href="/css/viewer.css?v=active-filters">
 </head>
 <body>
 
@@ -58,6 +58,7 @@
       <button id="search-toggle" type="button" aria-label="記事を検索" title="記事を検索" aria-expanded="false" aria-controls="search-panel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg></button>
     </div>
   </div>
+  <div id="active-filters" role="group" aria-label="絞り込み条件" hidden></div>
 </header>
 
 <div id="fragments">
@@ -656,6 +657,35 @@
     } catch (error) { if (version === loadVersion) showError(error); }
   }
 
+  function renderActiveFilters() {
+    document.querySelectorAll("#tag-filters .tag-btn").forEach(button => {
+      button.classList.toggle("active", activeTags.has(button.dataset.tag));
+    });
+    applyTagSearch();
+    const bar = document.getElementById("active-filters");
+    bar.hidden = activeTags.size === 0 && !showFavoritesOnly;
+    bar.innerHTML = bar.hidden ? "" : [...activeTags].map(tag =>
+      `<button type="button" data-tag="${escapeHtml(tag)}" aria-label="${escapeHtml(tag)} の絞り込みを解除"># ${escapeHtml(tag)} <span aria-hidden="true">×</span></button>`
+    ).join("") + '<button type="button" class="clear-all">条件をクリア</button>';
+  }
+
+  document.getElementById("active-filters").addEventListener("click", event => {
+    const button = event.target.closest("button");
+    if (!button || !fragmentsReady) return;
+    if (button.classList.contains("clear-all")) {
+      activeTags.clear();
+      searchQuery = dateFrom = dateTo = "";
+      for (const id of ["search", "date-from", "date-to"]) document.getElementById(id).value = "";
+      if (showFavoritesOnly) {
+        document.getElementById("fav-filter-btn").click();
+        return;
+      }
+    } else {
+      activeTags.delete(button.dataset.tag);
+    }
+    renderTagChange();
+  });
+
   function visibleArticleTop() {
     const viewport = viewerScroll.getBoundingClientRect();
     const header = document.querySelector("#viewer-scroll > header");
@@ -1103,6 +1133,7 @@
 
   // --- カード描画 ---
   function render() {
+    renderActiveFilters();
     updateSidebarCounts();
     renderSearchResults();
     const frags = filtered();
