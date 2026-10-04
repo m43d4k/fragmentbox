@@ -745,18 +745,24 @@ main { margin-left: 264px; min-width: 0; }
 }
 #folder-empty { color: var(--muted); font-size: 12px; padding: 8px 4px; }
 #status-message { padding: 10px 16px; color: var(--danger); }
-@media (max-width: 600px) {
-    #folder-pane { width: 150px; padding: 8px; }
-    #sidebar-head { gap: 7px; padding-left: 0; padding-right: 0; }
-    .brand-mark { width: 28px; height: 28px; flex-basis: 28px; border-radius: 9px; font-size: 20px; }
-    #sidebar-head h2 { font-size: 12px; }
-    .eyebrow { font-size: 8px; }
-    #area-switch { margin-left: 0; margin-right: 0; }
-    #folder-pane #area-switch button { padding: 8px 3px; font-size: 11px; }
-    main { margin-left: 150px; }
-    #header-top { gap: 8px; }
-    #date-filter { flex-wrap: wrap; }
+#folder-toggle, #folder-pane #folder-close, #folder-scrim { display: none; }
+#folder-toggle, #folder-pane #folder-close {
+    place-items: center;
+    flex: 0 0 35px;
+    width: 35px;
+    height: 35px;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 20px;
+    cursor: pointer;
 }
+#folder-pane #folder-close { margin-left: auto; }
+#folder-toggle:hover { background: #ffffff0c; color: var(--text); }
+
 
 
 /* 下部投稿欄 */
@@ -1106,6 +1112,31 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
     body.search-open #composer { padding-left: 16px; padding-right: 16px; }
 }
 @media (max-width: 760px) {
+    main { margin-left: 0; }
+    #folder-pane {
+        z-index: 190;
+        width: min(296px, calc(100vw - 44px));
+        padding-top: max(17px, env(safe-area-inset-top));
+        padding-bottom: max(18px, env(safe-area-inset-bottom));
+        box-shadow: 14px 0 40px #0007;
+        visibility: hidden;
+        transform: translateX(-105%);
+        transition: transform .22s ease, visibility .22s;
+    }
+    #folder-pane.drawer-open { visibility: visible; transform: translateX(0); }
+    .folder-menu { z-index: 195; }
+    #folder-toggle, #folder-pane #folder-close { display: grid; }
+    #folder-scrim:not([hidden]) {
+        display: block;
+        position: fixed;
+        z-index: 180;
+        inset: 0;
+        border: 0;
+        background: #08090c99;
+    }
+    #current-channel { flex: 1; }
+    #tag-search { font-size: 16px; }
+    #date-filter { flex-wrap: wrap; }
     header { padding: 0 12px; }
     #header-top { height: 54px; gap: 8px; }
     #active-filters { gap: 5px; padding: 8px 0; }

@@ -170,7 +170,7 @@ function searchPanelContext(mobile = false) {
     { id: 'needle-new', content: 'needle newer', created_at: '2026-09-22T12:00:00', tags: [] },
     { id: 'other-new', content: 'other', created_at: '2026-09-22T13:00:00', tags: [] },
   ];
-  const media = { matches: mobile, addEventListener() {} };
+  const media = { matches: mobile, addEventListener(type, listener) { this.onchange = listener; } };
   const context = {
     document,
     window: { matchMedia: () => media },
@@ -243,7 +243,78 @@ test('mobile search makes the main feed and folder sidebar inert until closed', 
   assert.equal(document.getElementById('folder-pane').inert, true);
   document.getElementById('search-back').click();
   assert.equal(document.querySelector('main').inert, false);
+  assert.equal(document.getElementById('folder-pane').inert, true);
+  dom.window.close();
+});
+
+test('mobile folder drawer opens and closes without moving the feed', () => {
+  const { dom } = searchPanelContext(true);
+  const { document, KeyboardEvent } = dom.window;
+  const toggle = document.getElementById('folder-toggle');
+  const pane = document.getElementById('folder-pane');
+  const scroll = document.getElementById('viewer-scroll');
+  scroll.scrollTop = 321;
+  assert.equal(pane.inert, true);
+  for (const close of [
+    () => document.getElementById('folder-close').click(),
+    () => document.getElementById('folder-scrim').click(),
+    () => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+  ]) {
+    toggle.click();
+    assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+    assert.equal(pane.inert, false);
+    assert.equal(document.querySelector('main').inert, true);
+    assert.equal(document.activeElement.id, 'folder-close');
+    close();
+    assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(pane.inert, true);
+    assert.equal(document.querySelector('main').inert, false);
+    assert.equal(document.activeElement, toggle);
+    assert.equal(scroll.scrollTop, 321);
+  }
+  dom.window.close();
+});
+
+test('folder drawer resets across responsive widths and does not overlap search', () => {
+  const { dom, media } = searchPanelContext(true);
+  const { document } = dom.window;
+  const toggle = document.getElementById('folder-toggle');
+  toggle.click();
+  media.matches = false;
+  media.onchange();
   assert.equal(document.getElementById('folder-pane').inert, false);
+  assert.equal(document.querySelector('main').inert, false);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  media.matches = true;
+  media.onchange();
+  assert.equal(document.getElementById('folder-pane').inert, true);
+  toggle.click();
+  document.getElementById('search-toggle').click();
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(document.getElementById('folder-scrim').hidden, true);
+  document.getElementById('search-back').click();
+  assert.equal(document.querySelector('main').inert, false);
+  assert.equal(document.getElementById('folder-pane').inert, true);
+  dom.window.close();
+});
+
+test('selecting a folder closes the drawer while a blocked selection keeps it open', () => {
+  const { dom, context } = searchPanelContext(true);
+  const { document } = dom.window;
+  Object.assign(context, {
+    composerBusy: true, folderBusy: false,
+    rememberScrollPosition() {}, closeFolderForm() {}, rememberFolderSelection() {},
+    renderFolders() {}, load() {},
+  });
+  vm.runInContext(html.slice(html.indexOf('  function selectFolder('), html.indexOf('  function selectArea(')), context);
+  document.getElementById('folder-toggle').click();
+  context.selectFolder('notes', '音楽');
+  assert.equal(document.getElementById('folder-toggle').getAttribute('aria-expanded'), 'true');
+  context.composerBusy = false;
+  context.selectFolder('notes', '音楽');
+  assert.equal(context.currentFolder, '音楽');
+  assert.equal(document.getElementById('folder-toggle').getAttribute('aria-expanded'), 'false');
+  assert.equal(document.querySelector('main').inert, false);
   dom.window.close();
 });
 
