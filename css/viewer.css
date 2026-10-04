@@ -32,15 +32,20 @@ header {
   top: 0;
   background: #1a1c22;
   border-bottom: 1px solid #292b33;
-  padding: 14px 30px 12px;
+  padding: 0 30px;
   z-index: 100;
 }
 
 #header-top {
   display: flex;
+  height: 58px;
+  gap: 12px;
   align-items: center;
   justify-content: space-between;
 }
+
+#current-channel { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.area-badge { flex: none; padding: 4px 7px; border: 1px solid #3a3944; border-radius: 5px; color: #aaa2c0; font-size: 9px; white-space: nowrap; }
 
 /* 独立した検索カラム */
 #search-toggle, #search-close, #search-back {
@@ -94,10 +99,12 @@ body.search-open main { margin-right: clamp(320px, 35vw, 460px); }
 #search-empty { margin: 40px 0; color: var(--muted); font-size: 12px; text-align: center; }
 
 header h1 {
-  font-size: 15px;
-  color: #f2f2f5;
-  font-weight: 700;
-  letter-spacing: -.02em;
+    overflow: hidden;
+    font-size: 14px;
+    color: #dedfe5;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 #search {
@@ -398,9 +405,24 @@ a.url-title:hover { color: #dfd2ff; }
 
 #header-right {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 8px;
 }
+#header-right #search-toggle, #header-right #fav-filter-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border: 0;
+    border-radius: 9px;
+    font-size: 17px;
+}
+#header-right #search-toggle { color: #b1b3bd; }
+#header-right #search-toggle[aria-expanded="true"] { color: var(--accent); }
+#header-right #search-toggle:hover, #header-right #fav-filter-btn:hover { background: #ffffff0c; }
 
 /* お気に入りフィルターボタン */
 .fav-filter-btn {
@@ -707,7 +729,7 @@ main { margin-left: 264px; min-width: 0; }
     #area-switch { margin-left: 0; margin-right: 0; }
     #folder-pane #area-switch button { padding: 8px 3px; font-size: 11px; }
     main { margin-left: 150px; }
-    #header-top { flex-wrap: wrap; gap: 8px; }
+    #header-top { gap: 8px; }
     #date-filter { flex-wrap: wrap; }
 }
 
@@ -1058,6 +1080,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
     body.search-open #composer { padding-left: 16px; padding-right: 16px; }
 }
 @media (max-width: 760px) {
+    header { padding: 0 12px; }
+    #header-top { height: 54px; gap: 8px; }
+    #current-channel { gap: 7px; }
+    header h1 { font-size: 13px; }
+    #header-right { gap: 4px; }
+    #header-right #search-toggle, #header-right #fav-filter-btn { width: 30px; }
     body.search-open main { margin-right: 0; }
     body.search-open main, body.search-open #folder-pane { visibility: hidden; }
     #search-panel {
@@ -1077,7 +1105,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 #composer button[type="submit"]:not(:disabled):hover { background: #8872c5; }
 
 @media (max-width: 600px) {
-    header { padding: 12px; }
     #fragments { padding: 4px 13px 28px; }
     .card { padding: 16px 1px 19px; }
     .card + .card::before { left: 1px; right: 1px; }

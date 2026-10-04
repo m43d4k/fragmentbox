@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>fragmentbox</title>
-  <link rel="stylesheet" href="/css/viewer.css?v=sidebar-navigation">
+  <link rel="stylesheet" href="/css/viewer.css?v=channel-header">
 </head>
 <body>
 
@@ -49,9 +49,12 @@
 <div id="status-message" role="alert" hidden></div>
 <header>
   <div id="header-top">
-    <h1>fragmentbox</h1>
+    <div id="current-channel">
+      <h1 id="current-folder">inbox</h1>
+      <span id="current-area" class="area-badge">General</span>
+    </div>
     <div id="header-right">
-      <button id="fav-filter-btn" class="fav-filter-btn" title="Show favorites only">♥</button>
+      <button id="fav-filter-btn" class="fav-filter-btn" title="Show favorites only" aria-label="お気に入りで絞り込む" aria-pressed="false">♥</button>
       <button id="search-toggle" type="button" aria-label="記事を検索" title="記事を検索" aria-expanded="false" aria-controls="search-panel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg></button>
     </div>
   </div>
@@ -137,6 +140,7 @@
   let folderBusy = false;
   let draggedFolder = null;
   let showFavoritesOnly = false;
+  const favoriteScrollPositions = new Map();
   let composerBusy = false;
   let composerReady = false;
   let imageExtensions = [];
@@ -318,6 +322,10 @@
   function renderFolders() {
     updateComposer();
     const archive = currentSource === "archive";
+    const folderName = currentFolder || (currentSource === "inbox" ? "inbox" : "フォルダ未選択");
+    document.getElementById("current-folder").textContent = folderName;
+    document.getElementById("current-folder").title = folderName;
+    document.getElementById("current-area").textContent = archive ? "Archive" : "General";
     const busy = folderBusy || composerBusy;
     const list = document.getElementById("folder-list");
     list.replaceChildren();
@@ -1817,9 +1825,27 @@
   });
 
   document.getElementById("fav-filter-btn").addEventListener("click", () => {
+    if (!fragmentsReady) return;
+    const scrollKey = () => JSON.stringify([scopeQuery().toString(), [...activeTags].sort(), tagMode, showFavoritesOnly]);
+    const top = visibleArticleTop();
+    const bottom = viewerScroll.getBoundingClientRect().bottom;
+    const atBottom = viewerScroll.scrollHeight - viewerScroll.clientHeight - viewerScroll.scrollTop <= 2;
+    const card = [...document.querySelectorAll("#cards > .card")].find(card => {
+      const bounds = card.getBoundingClientRect();
+      return bounds.bottom > top && bounds.top < bottom;
+    });
+    favoriteScrollPositions.set(scrollKey(), {
+      position: atBottom ? null : viewerScroll.scrollTop,
+      anchor: !atBottom && card ? { id: card.dataset.id, offset: card.getBoundingClientRect().top - top } : null,
+    });
     showFavoritesOnly = !showFavoritesOnly;
     document.getElementById("fav-filter-btn").classList.toggle("active", showFavoritesOnly);
+    document.getElementById("fav-filter-btn").setAttribute("aria-pressed", String(showFavoritesOnly));
+    restoringScroll = null;
     render();
+    const saved = favoriteScrollPositions.get(scrollKey()) || { position: null, anchor: null };
+    restoringScroll = { ...saved, key: displayedScrollKey };
+    applyScrollPosition();
   });
 
   function selectFolder(source, folder) {

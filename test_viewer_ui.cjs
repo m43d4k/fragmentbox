@@ -1001,3 +1001,79 @@ test('navigation refresh retains known counts when an older API omits them and r
   assert.deepEqual(Array.from(context.folders, folder => folder.count), [0, 15]);
   assert.equal(errors.length, 1);
 });
+
+test('central header follows folder selection and distinguishes General from Archive', () => {
+  const { dom, context, document } = sidebarContext();
+  for (const [source, folder, name, area] of [
+    ['inbox', '', 'inbox', 'General'],
+    ['notes', '音楽', '音楽', 'General'],
+    ['archive', '音楽', '音楽', 'Archive'],
+    ['archive', '', 'フォルダ未選択', 'Archive'],
+    ['notes', '<b>制作</b>', '<b>制作</b>', 'General'],
+  ]) {
+    context.currentSource = source;
+    context.currentFolder = folder;
+    context.renderFolders();
+    assert.equal(document.getElementById('current-folder').textContent, name);
+    assert.equal(document.getElementById('current-area').textContent, area);
+    assert.equal(document.getElementById('current-folder').children.length, 0);
+  }
+  assert.ok(document.querySelector('#header-right #search-toggle'));
+  assert.ok(document.querySelector('#header-right #fav-filter-btn'));
+  dom.window.close();
+});
+
+test('favorite filter restores each view position and follows delayed layout changes', () => {
+  let handler;
+  let normalHeight = 5000;
+  let articleTop = 2050;
+  const scroll = {
+    top: 2000, clientHeight: 600,
+    get scrollHeight() { return context.showFavoritesOnly ? 800 : normalHeight; },
+    get scrollTop() { return this.top; },
+    set scrollTop(value) { this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); },
+    getBoundingClientRect: () => ({ top: 0, bottom: 600 }),
+    addEventListener() {},
+  };
+  const card = {
+    dataset: { id: 'reading' },
+    getBoundingClientRect: () => ({ top: articleTop - scroll.top, bottom: articleTop - scroll.top + 300 }),
+  };
+  const button = { classList: { toggle() {} }, setAttribute() {}, addEventListener(_, callback) { handler = callback; } };
+  const context = {
+    showFavoritesOnly: false, favoriteScrollPositions: new Map(), fragmentsReady: true,
+    activeTags: new Set(), tagMode: 'AND', scopeQuery: () => 'folder=A',
+    visibleArticleTop: () => 100,
+    document: {
+      getElementById: id => id === 'fav-filter-btn' ? button : scroll,
+      querySelectorAll: () => context.showFavoritesOnly ? [] : [card],
+    },
+    ResizeObserver: class { observe() {} },
+    render() { scroll.scrollTop = scroll.scrollTop; },
+  };
+  vm.createContext(context);
+  const positions = html.slice(html.indexOf('  const folderScrollPositions'), html.indexOf('  // --- データ取得 ---'));
+  const toggle = html.slice(html.indexOf('  document.getElementById("fav-filter-btn").addEventListener("click"'), html.indexOf('  function selectFolder('));
+  vm.runInContext(positions + '\ndisplayedScrollKey = "folder=A";\n' + toggle, context);
+  handler();
+  assert.equal(scroll.scrollTop, 200, 'first favorite view starts at the newest articles');
+  scroll.scrollTop = 50;
+  handler();
+  assert.equal(scroll.scrollTop, 2000, 'unfiltering restores the original reading position');
+  articleTop += 150;
+  normalHeight += 150;
+  vm.runInContext('applyScrollPosition()', context);
+  assert.equal(scroll.scrollTop, 2150, 'late image layout retains the same article offset');
+  handler();
+  assert.equal(scroll.scrollTop, 50, 'favorite view retains its own reading position');
+  handler();
+  assert.equal(scroll.scrollTop, 2150);
+  scroll.scrollTop = normalHeight - scroll.clientHeight;
+  handler();
+  handler();
+  assert.equal(scroll.scrollTop, normalHeight - scroll.clientHeight, 'bottom remains bottom');
+  const before = context.showFavoritesOnly;
+  context.fragmentsReady = false;
+  handler();
+  assert.equal(context.showFavoritesOnly, before, 'do not save a transient loading position');
+});
