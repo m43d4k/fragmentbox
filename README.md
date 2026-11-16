@@ -9,7 +9,7 @@ A simple personal note-taking tool to quickly capture ideas and save them locall
 fragmentbox consists of two components:
 
 - **fragmentbox.py** — A GUI (PySide6) for quickly writing and saving notes
-- **viewer.py** — A web viewer (FastAPI) for browsing and searching saved notes
+- **viewer.py** — A dedicated desktop viewer (FastAPI + pywebview) for browsing and searching saved notes
 
 ## Documentation and Planned Changes
 
@@ -71,10 +71,12 @@ FRAGMENTBOX_LOG=DEBUG ./run_fragmentbox.sh
 ![viewer](docs/screenshot_viewer.png)
 
 ```bash
-python viewer.py
+./run_viewer.sh start
+# Or launch directly without the local script
+uv run python viewer.py
 ```
 
-The server starts and a browser window opens automatically (port: `8765`).
+Once the server is ready, a dedicated window opens. The port comes from `[viewer].port` in `config.toml` (default: `8765`). macOS uses the system WebKit engine. Linux requires a Qt or GTK runtime for pywebview.
 
 **Viewer features:**
 
@@ -86,7 +88,7 @@ The server starts and a browser window opens automatically (port: `8765`).
 - Edit notes (normal folders, Inbox, and Archive; edit inline using the pencil icon on an article)
 - Permanently delete notes from normal folders or Inbox after confirmation, including referenced images unused by other articles
 
-Press `Ctrl+C` in the terminal to stop the server.
+Closing the window also stops the web server and exits the application. The launch script supports `./run_viewer.sh stop` and `./run_viewer.sh status`. Startup errors are recorded in `.viewer.log`. The local `run_viewer.sh` script is excluded from Git.
 
 ## Creating the Launch Script
 

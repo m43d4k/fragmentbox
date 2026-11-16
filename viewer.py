@@ -1,3 +1,4 @@
+import argparse
 import json
 import html
 import ipaddress
@@ -8,10 +9,11 @@ import hashlib
 import os
 import re
 import shutil
+import socket
 import tempfile
 import threading
+import time
 import tomllib
-import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -1046,12 +1048,56 @@ def index() -> FileResponse:
     return FileResponse(HERE / "viewer.html")
 
 
-def _open_browser() -> None:
-    import time
-    time.sleep(0.8)
-    webbrowser.open(f"http://127.0.0.1:{PORT}")
+def main(argv: list[str] | None = None) -> None:
+    import webview
+
+    parser = argparse.ArgumentParser(description="FragmentBox Viewer")
+    parser.add_argument("--pid-file", type=Path, help="起動スクリプト用のPIDファイル")
+    args = parser.parse_args(argv)
+    config = uvicorn.Config(app, host="127.0.0.1", port=PORT)
+    server = uvicorn.Server(config)
+    # メインスレッドでポートを確保し、競合時にはウィンドウを開かず終了する。
+    sock = socket.create_server(("127.0.0.1", PORT))
+    errors: list[BaseException] = []
+    stopped = threading.Event()
+
+    def serve() -> None:
+        try:
+            server.run(sockets=[sock])
+        except (Exception, SystemExit) as exc:
+            errors.append(exc)
+        finally:
+            stopped.set()
+
+    def stop_server() -> None:
+        server.should_exit = True
+
+    def record_pid() -> None:
+        if args.pid_file is not None:
+            args.pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    thread = threading.Thread(target=serve, name="viewer-server")
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            if stopped.wait(0.01):
+                raise RuntimeError("Webサーバーを起動できませんでした") from (errors[0] if errors else None)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Webサーバーの起動がタイムアウトしました")
+        url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+        window = webview.create_window("FragmentBox", url, width=1280, height=900)
+        window.events.closed += stop_server
+        window.events.shown += record_pid
+        webview.start()
+    finally:
+        stop_server()
+        thread.join()
+        sock.close()
+        if args.pid_file is not None and args.pid_file.exists():
+            if args.pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                args.pid_file.unlink()
 
 
 if __name__ == "__main__":
-    threading.Thread(target=_open_browser, daemon=True).start()
-    uvicorn.run(app, host="127.0.0.1", port=PORT)
+    main()

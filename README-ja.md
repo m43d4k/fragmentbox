@@ -9,7 +9,7 @@
 fragmentbox は2つのコンポーネントで構成されています。
 
 - **fragmentbox.py** — メモをすばやく書いて保存する GUI（PySide6）
-- **viewer.py** — 保存されたメモをブラウザで一覧・検索する Web ビューア（FastAPI）
+- **viewer.py** — 保存されたメモを専用ウィンドウで一覧・検索するビューア（FastAPI + pywebview）
 
 ## ドキュメントと変更方針
 
@@ -71,10 +71,12 @@ FRAGMENTBOX_LOG=DEBUG ./run_fragmentbox.sh
 ![viewer](docs/screenshot_viewer.png)
 
 ```bash
-python viewer.py
+./run_viewer.sh start
+# 起動スクリプトを使わず直接開く場合
+uv run python viewer.py
 ```
 
-サーバーが起動し、ブラウザが自動的に開きます（ポート: `8765`）。
+サーバーの起動後、専用ウィンドウが開きます（ポートは `config.toml` の `[viewer].port`、既定値: `8765`）。macOSではOS標準のWebKitを使用します。Linuxではpywebview用のQtまたはGTKの実行環境が必要です。
 
 **ビューア機能:**
 
@@ -86,7 +88,7 @@ python viewer.py
 - メモの編集（通常フォルダ / Inbox / Archive。記事のペンシルアイコンから、その記事内で編集する）
 - メモの完全削除（通常フォルダ / Inbox。確認後に削除し、他の記事で使われていない参照画像も削除）
 
-終了するにはターミナルで `Ctrl+C` を押します。
+ウィンドウの閉じるボタンを押すと、Webサーバーも停止してアプリ全体が終了します。起動スクリプトでは `./run_viewer.sh stop` で終了、`./run_viewer.sh status` で状態を確認できます。起動失敗の詳細は `.viewer.log` に出力します。`run_viewer.sh` はローカル用のGit管理対象外ファイルです。
 
 ## 起動スクリプトの作成
 

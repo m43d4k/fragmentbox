@@ -9,10 +9,14 @@ viewer.py のユニットテスト
 """
 
 import tempfile
+import socket
+import sys
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from urllib.request import urlopen
 
 from fastapi import HTTPException
 
@@ -945,6 +949,81 @@ class TestStandaloneTags(unittest.TestCase):
                 self.assertEqual(path.read_text(), original + '\n\n#favorite\n')
                 self.assertFalse(viewer.toggle_favorite('note').favorited)
                 self.assertEqual(path.read_text().rstrip(), original)
+
+
+class TestViewerWindow(unittest.TestCase):
+    class Event:
+        def __init__(self):
+            self.handlers = []
+
+        def __iadd__(self, handler):
+            self.handlers.append(handler)
+            return self
+
+        def fire(self):
+            for handler in self.handlers:
+                handler()
+
+    def setUp(self):
+        self.webview = Mock()
+        self.window = self.webview.create_window.return_value
+        self.window.events.closed = self.Event()
+        self.window.events.shown = self.Event()
+        self.modules = patch.dict(sys.modules, {"webview": self.webview})
+        self.modules.start()
+        self.addCleanup(self.modules.stop)
+        self.port = patch.object(viewer, "PORT", 0)
+        self.port.start()
+        self.addCleanup(self.port.stop)
+
+    def test_window_close_stops_server_and_removes_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "viewer.pid"
+            urls = []
+
+            def show_and_close():
+                self.assertIs(threading.current_thread(), threading.main_thread())
+                url = self.webview.create_window.call_args.args[1]
+                urls.append(url)
+                with urlopen(url, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+                self.window.events.shown.fire()
+                self.assertEqual(pid_file.read_text().strip(), str(viewer.os.getpid()))
+                self.window.events.closed.fire()
+
+            self.webview.start.side_effect = show_and_close
+            viewer.main(["--pid-file", str(pid_file)])
+            self.assertFalse(pid_file.exists())
+            with self.assertRaises(OSError):
+                urlopen(urls[0], timeout=1)
+
+    def test_gui_failure_stops_server(self):
+        urls = []
+
+        def fail_gui():
+            urls.append(self.webview.create_window.call_args.args[1])
+            raise RuntimeError("GUI failed")
+
+        self.webview.start.side_effect = fail_gui
+        with self.assertRaisesRegex(RuntimeError, "GUI failed"):
+            viewer.main([])
+        with self.assertRaises(OSError):
+            urlopen(urls[0], timeout=1)
+
+    def test_occupied_port_does_not_open_window(self):
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            with patch.object(viewer, "PORT", occupied.getsockname()[1]):
+                with self.assertRaises(OSError):
+                    viewer.main([])
+        self.webview.create_window.assert_not_called()
+
+    def test_server_startup_failure_does_not_open_window(self):
+        with patch.object(viewer.uvicorn.Server, "startup", side_effect=RuntimeError("startup failed")):
+            with self.assertRaisesRegex(RuntimeError, "Webサーバーを起動できませんでした"):
+                viewer.main([])
+        self.webview.create_window.assert_not_called()
 
 
 if __name__ == "__main__":
