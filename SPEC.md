@@ -789,3 +789,15 @@ YouTubeのプレビュー取得はoEmbed APIに変更する。動画ストリー
 ウィンドウの閉じるボタンでサーバーへ終了を要求し、サーバースレッドの終了を待ってアプリ全体を終了する。GUI初期化に失敗した場合もサーバーを停止する。ポート競合やサーバー起動失敗ではウィンドウを開かずエラーとし、起動完了待ちは10秒でタイムアウトする。
 
 ローカル用の起動スクリプトはGit管理対象外のままとし、`uv run python viewer.py --pid-file ...` を実行する。ウィンドウ表示後にアプリ自身のPIDを `.viewer.pid` に記録し、通常終了時に削除する。`stop` はアプリ全体を停止し、`status` は稼働状態を表示する。起動失敗・30秒の起動待ちタイムアウトは非ゼロで終了し、詳細を `.viewer.log` で確認できる。`uv run python viewer.py` と `fragmentbox-viewer` からの直接起動にも対応する。
+
+## 43. macOSのDockからの起動（実装済み）
+
+`uv run --group macos-app python macos/setup.py py2app` で、py2appのaliasモードを使用した `dist/FragmentBox.app` を生成する。ビルド用依存は `macos-app` グループに分け、macOSでのみインストールする。既存のHatchによるパッケージ設定は維持する。
+
+アプリ名はFragmentBox、Bundle IDは `local.fragmentbox.viewer` とし、通常アプリとしてDockに表示する。生成したアプリをDockに登録して起動できる。起動用プロセス内で既存のPythonランタイムと仮想環境を読み込み、元の `viewer.py` を実行する。`uv` やシェルの監視プロセスは追加しない。
+
+アイコンの原本は `macos/FragmentBox.svg` とし、ビルド時に既存のPySide6で1024pxの `.icns` と確認用PNGを生成する。`.icns` をアプリへ同梱し、`CFBundleIconFile` で指定する。アイコン生成処理はアプリ起動時には実行しない。
+
+ソース・`config.toml`・HTML・CSSは元の場所から読み込む。通常のソース修正は再起動で反映し、Python環境・プロジェクトの場所・アプリ設定を変更した場合はアプリを終了して再生成する。alias版はこのMac専用とし、配布には使用しない。生成物はGit管理対象外とする。
+
+ウィンドウを閉じる操作と `Cmd+Q` で、サーバーとともにアプリ全体を終了する。別の方法で起動中のビューアがある場合は、先に終了してポートを空ける。アプリからの起動では起動スクリプトのPID管理を使用せず、起動エラーはmacOSのコンソールで確認する。

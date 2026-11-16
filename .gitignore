@@ -24,3 +24,8 @@ uv.lock
 
 # Viewer test dependencies
 node_modules/
+
+# macOS app build output
+build/
+dist/
+*.egg-info/

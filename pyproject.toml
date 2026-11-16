@@ -21,3 +21,8 @@ dependencies = [
 [project.scripts]
 fragmentbox = "fragmentbox:main"
 fragmentbox-viewer = "viewer:main"
+
+[dependency-groups]
+macos-app = [
+    "py2app>=0.28.8,<0.29 ; sys_platform == 'darwin'",
+]

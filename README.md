@@ -90,6 +90,24 @@ Once the server is ready, a dedicated window opens. The port comes from `[viewer
 
 Closing the window also stops the web server and exits the application. The launch script supports `./run_viewer.sh stop` and `./run_viewer.sh status`. Startup errors are recorded in `.viewer.log`. The local `run_viewer.sh` script is excluded from Git.
 
+### Launch from the macOS Dock
+
+Run the following commands from the project root to build `dist/FragmentBox.app` using py2app's alias mode.
+The build converts the source icon, `macos/FragmentBox.svg`, to `.icns` using the existing PySide6 dependency and includes it in the app.
+
+```bash
+uv run --group macos-app python macos/setup.py py2app
+open dist/FragmentBox.app
+```
+
+Drag `dist/FragmentBox.app` from Finder to the app area of the Dock to launch it from there. If the viewer is already running through another launch method, quit it first to free the port. Closing the window or pressing `Cmd+Q` exits both the app and its server.
+
+- The app references the existing virtual environment, source files, `config.toml`, HTML, and CSS. Launching it does not require starting `uv` or a terminal.
+- Restart the app to pick up normal source changes. If the Python environment, project location, or app settings change, quit the app and rebuild it with the same command.
+- This `.app` is specific to this Mac and is not intended for distribution to other Macs. Keep the project and virtual environment in place.
+- Check macOS Console for `.app` startup errors. The app does not use the launch script's PID management.
+- Generated `build/` and `dist/` directories are excluded from Git.
+
 ## Creating the Launch Script
 
 `run_fragmentbox.sh` is not included in the repository because it depends on the local environment. Create it in the project root using the template below and make it executable with `chmod +x`.

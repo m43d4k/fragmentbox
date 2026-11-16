@@ -90,6 +90,24 @@ uv run python viewer.py
 
 ウィンドウの閉じるボタンを押すと、Webサーバーも停止してアプリ全体が終了します。起動スクリプトでは `./run_viewer.sh stop` で終了、`./run_viewer.sh status` で状態を確認できます。起動失敗の詳細は `.viewer.log` に出力します。`run_viewer.sh` はローカル用のGit管理対象外ファイルです。
 
+### macOSのDockから起動する
+
+プロジェクトルートで次のコマンドを実行すると、py2appのaliasモードで `dist/FragmentBox.app` を生成する。
+アイコンは `macos/FragmentBox.svg` を原本とし、ビルド時に既存のPySide6で `.icns` に変換して組み込む。
+
+```bash
+uv run --group macos-app python macos/setup.py py2app
+open dist/FragmentBox.app
+```
+
+Finderで `dist/FragmentBox.app` をDockのアプリ領域へドラッグすると、以後はDockから起動できる。別の方法でビューアを起動している場合は、先に終了してポートを空ける。アプリはウィンドウの閉じるボタン、または `Cmd+Q` でサーバーとともに終了する。
+
+- 既存の仮想環境・ソース・`config.toml`・HTML・CSSを参照する。起動時に `uv` やターミナルを起動する必要はない。
+- 通常のソース修正はアプリの再起動で反映される。Python環境・プロジェクトの場所・アプリの設定を変更した場合は、アプリを終了して同じコマンドで再生成する。
+- `.app` はこのMac専用で、別のMacへの配布用ではない。プロジェクトと仮想環境は残しておく。
+- `.app` の起動エラーはmacOSのコンソールで確認する。起動スクリプトのPID管理は使用しない。
+- 生成物の `build/` と `dist/` はGit管理対象外とする。
+
 ## 起動スクリプトの作成
 
 `run_fragmentbox.sh` はローカル環境依存のため Git に含まれていません。以下を参考にプロジェクトルートに作成し、`chmod +x` で実行権限を付与してください。
