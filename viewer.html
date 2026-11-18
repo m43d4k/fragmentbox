@@ -898,6 +898,10 @@
             || /^\/assets\/attachment_[a-f0-9]{32}\.[a-z0-9]+$/.test(token.href)) {
           return renderLine(token.raw, imageLinks, repairId, attachments);
         }
+        if (/^(?:https?:)?\/\//i.test(token.href)) {
+          const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+          return `<a href="${escapeHtml(token.href)}"${title} target="_blank" rel="noopener">${this.parser.parseInline(token.tokens)}</a>`;
+        }
         return false;
       },
       paragraph(token) {

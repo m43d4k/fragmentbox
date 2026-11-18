@@ -817,6 +817,36 @@ function markdownDocument(content, { imageLinks = [], attachments = [], tagLines
   return new JSDOM(`<div class="card-body">${context.result}</div>`).window.document;
 }
 
+test('Markdown external web links open outside the viewer, preserving labels and URLs', () => {
+  const document = markdownDocument([
+    '[**資料**](https://example.com/page?a=1&b=2 "説明")',
+    '[HTTP](http://example.com/page)',
+    '[relative protocol](//example.com/page)',
+    '本文 https://example.com/inline',
+    '<https://example.com/autolink>',
+    'https://example.com/preview\ntitle: Preview',
+  ].join('\n\n'));
+  const links = [...document.querySelectorAll('a')];
+  assert.equal(links.length, 7);
+  for (const link of links) {
+    assert.equal(link.target, '_blank', link.outerHTML);
+    assert.ok(link.relList.contains('noopener'), link.outerHTML);
+  }
+  assert.equal(links[0].getAttribute('href'), 'https://example.com/page?a=1&b=2');
+  assert.equal(links[0].title, '説明');
+  assert.equal(links[0].querySelector('strong').textContent, '資料');
+});
+
+test('Markdown local links and attachments retain their existing navigation controls', () => {
+  const asset = 'attachment_' + 'b'.repeat(32) + '.pdf';
+  const document = markdownDocument(`[section](#section)\n\n[local](/assets/image.webp)\n\n[資料](../assets/${asset})`, {
+    attachments: [{ asset, name: '資料.pdf', size: 1024 }],
+  });
+  for (const link of document.querySelectorAll('a')) assert.equal(link.target, '');
+  assert.equal(document.querySelector('.attachment-open').dataset.asset, asset);
+  assert.equal(document.querySelector('.attachment-download').getAttribute('download'), '資料.pdf');
+});
+
 test('Markdown renders headings, emphasis, nested lists, quotes, fenced code, and tables', () => {
   const document = markdownDocument('# 見出し\n\n本文 **太字** *強調* ~~取消~~ `code`\n次の行\n\n- 親\n  - 子\n\n1. 順序\n\n> 引用\n\n```js\nconst x = "<div>";\n```\n\n| 列 | 値 |\n| --- | --- |\n| A | B |');
   for (const selector of ['h1', 'strong', 'em', 'del', 'code', 'br', 'ul ul li', 'ol li', 'blockquote', 'pre code.language-js', 'table th', 'table td']) {
