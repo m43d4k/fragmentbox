@@ -1086,7 +1086,7 @@ def main(argv: list[str] | None = None) -> None:
             if time.monotonic() >= deadline:
                 raise RuntimeError("Webサーバーの起動がタイムアウトしました")
         url = f"http://127.0.0.1:{sock.getsockname()[1]}"
-        window = webview.create_window("FragmentBox", url, width=1280, height=900)
+        window = webview.create_window("FragmentBox", url, width=1280, height=900, text_select=True)
         window.events.closed += stop_server
         window.events.shown += record_pid
         webview.start()
